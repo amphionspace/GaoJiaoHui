@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Amphion 语音接口本地交互 Demo</title>
+<style>
+:root{
+  --bg:#f5f6f8;--panel:#ffffff;--panel2:#f2f4f7;--line:#dfe3e9;
+  --text:#1f2430;--dim:#66707d;--acc:#2f6fed;--ok:#178a4c;--warn:#b45309;--err:#c93131;
+  --spk1:#2f6fed;--spk2:#0d8a5f;--spk3:#b45309;--spk4:#7c3aed;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+  font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;font-size:14px}
+header{padding:14px 22px;border-bottom:1px solid var(--line);
+  display:flex;gap:14px;align-items:center;flex-wrap:wrap;background:var(--panel)}
+header h1{font-size:17px;margin:0;font-weight:600}
+header .sub{color:var(--dim);font-size:12px}
+#keybox{margin-left:auto;display:flex;gap:8px;align-items:center}
+#apikey{width:330px;background:#fff;border:1px solid var(--line);color:var(--text);
+  padding:7px 10px;border-radius:8px;font-size:12px;font-family:ui-monospace,monospace}
+#health-dot{width:10px;height:10px;border-radius:50%;background:#9aa3af;display:inline-block}
+nav{display:flex;gap:6px;padding:10px 22px 0;background:var(--panel);border-bottom:1px solid var(--line)}
+nav button{background:none;border:1px solid transparent;border-bottom:none;color:var(--dim);
+  padding:9px 16px;font-size:14px;cursor:pointer;border-radius:10px 10px 0 0}
+nav button.active{color:var(--text);background:var(--bg);border-color:var(--line)}
+main{padding:20px 22px;max-width:1060px;margin:0 auto}
+.panel{display:none}.panel.active{display:block}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+.card h2{margin:0 0 4px;font-size:15px}
+.card .desc{color:var(--dim);font-size:12px;margin-bottom:12px;line-height:1.6}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0}
+button.act{background:var(--acc);border:none;color:#fff;padding:9px 18px;border-radius:8px;
+  font-size:14px;cursor:pointer}
+button.act.stop{background:var(--err)}
+button.act.ghost{background:#fff;border:1px solid var(--line);color:var(--text)}
+button.act:disabled{opacity:.45;cursor:not-allowed}
+button.mini{background:#fff;border:1px solid var(--line);color:var(--text);
+  padding:4px 10px;border-radius:7px;font-size:12px;cursor:pointer}
+input[type=text],textarea,select{background:#fff;border:1px solid var(--line);
+  color:var(--text);padding:8px 10px;border-radius:8px;font-size:13px}
+textarea{width:100%;min-height:64px;resize:vertical}
+#partial{font-size:19px;line-height:1.7;min-height:58px;padding:12px;
+  background:var(--panel2);border-radius:10px;border:1px dashed #c6ccd6}
+#final-box{margin-top:12px;padding:14px;border-radius:10px;background:rgba(23,138,76,.05);
+  border:1px solid rgba(23,138,76,.35);display:none}
+#final-box .ft{font-size:18px;line-height:1.7}
+.meta{color:var(--dim);font-size:12px;margin-top:8px}
+#bubbles{display:flex;flex-direction:column;gap:8px;max-height:340px;overflow-y:auto;padding:4px}
+.bub{max-width:78%;padding:9px 13px;border-radius:12px;background:#fff;
+  border:1px solid var(--line);line-height:1.6}
+.bub .who{font-size:11px;margin-bottom:3px;font-weight:600}
+.bub.pending{opacity:.65;font-style:italic}
+.bub .txt{font-size:15px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+th{color:var(--dim);font-weight:500}
+#log{background:#f8fafb;border:1px solid var(--line);border-radius:10px;padding:10px;
+  font-family:ui-monospace,monospace;font-size:11.5px;max-height:220px;overflow-y:auto;
+  color:#4b5563;white-space:pre-wrap;word-break:break-all}
+#log .l-err{color:var(--err)}#log .l-ok{color:var(--ok)}#log .l-evt{color:var(--acc)}
+audio{width:100%;margin-top:10px}
+.tag{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;
+  background:var(--panel2);border:1px solid var(--line);color:var(--dim);margin-right:6px}
+.timer{font-family:ui-monospace,monospace;color:var(--warn);font-size:13px}
+.hint{color:var(--warn);font-size:12px}
+#refcanvas{width:100%;height:46px;background:var(--panel2);border-radius:8px;margin-top:8px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Amphion 语音接口 Demo</h1>
+  <span class="sub">VM-0-4-ubuntu · amphion.top</span>
+  <div id="keybox">
+    <span id="health-dot"></span><span class="sub" id="health-txt">网关状态未知</span>
+    <input id="apikey" type="text" placeholder="API Key（sk-...）" spellcheck="false">
+    <label class="sub" style="display:inline-flex;gap:5px;align-items:center;cursor:pointer">
+      <input type="checkbox" id="demo-mode" checked>演示模式</label>
+    <button class="mini" onclick="checkHealth()">检查</button>
+  </div>
+</header>
+<nav>
+  <button class="active" onclick="switchTab(0,this)">流式转写（停顿修正）</button>
+  <button onclick="switchTab(1,this)">多人说话人分离</button>
+  <button onclick="switchTab(2,this)">声纹注册与音色克隆</button>
+</nav>
+<main>
+
+<!-- ============ 接口一 ============ -->
+<section class="panel active" id="p0">
+  <div class="card">
+    <h2>接口一 流式转写 <span class="tag">WS /asr/v1/realtime</span><span class="tag">JSON·base64 音频帧</span></h2>
+    <div class="desc">录音实时上屏；每次 <code>transcription.delta</code> 携带<b>全量累积文本</b>（停顿修正），
+      松开/停止后 <code>commit{final:true}</code> 出最终全文与计费时长。也可选本地音频文件按 1× 速率回放测试。</div>
+    <div class="row">
+      <button class="act" id="btn-mic1" onclick="startRealtime('mic')">开始录音</button>
+      <button class="act stop" id="btn-stop1" onclick="stopRealtime()" disabled>结束并出全文</button>
+      <label class="act ghost" style="display:inline-block">音频文件测试
+        <input type="file" accept="audio/*" style="display:none"
+               onchange="startRealtime('file', this.files[0]); this.value=''"></label>
+      <label class="sub" style="display:inline-flex;gap:4px;align-items:center;cursor:pointer">
+        <input type="checkbox" id="auto-flow" checked>自动流转</label>
+      <label class="sub" style="display:inline-flex;gap:4px;align-items:center">静音判停
+        <input type="number" id="vad-silence" value="2.5" min="1" max="10" step="0.5" style="width:52px">秒</label>
+      <button class="mini" id="btn-cancel-auto" onclick="cancelAutoFinish()" style="display:none">取消自动收尾</button>
+      <span class="sub" id="st1">空闲</span>
+    </div>
+    <div id="partial">（实时转写会显示在这里…）</div>
+    <div id="final-box">
+      <div class="ft" id="final-text"></div>
+      <div class="meta" id="final-meta"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 接口二 ============ -->
+<section class="panel" id="p1">
+  <div class="card">
+    <h2>接口二 多人说话人分离 <span class="tag">WS /asr/v1/target-dialogue</span><span class="tag">二进制 PCM 帧</span><span class="tag">open 模式</span></h2>
+    <div class="desc">优先经本地代理申请 <b>ephemeral token</b>（一次性 JWT，浏览器免长期 Key），失败自动退回
+      <code>?api_key=</code> 直连。每个 <code>transcription.final</code> 为一个说话人气泡（role_index 着色）。</div>
+    <div class="row">
+      <button class="act" id="btn-mic2" onclick="startDialogue('mic')">开始录音</button>
+      <button class="act stop" id="btn-stop2" onclick="stopDialogue()" disabled>结束</button>
+      <label class="act ghost" style="display:inline-block">音频文件测试
+        <input type="file" accept="audio/*" style="display:none"
+               onchange="startDialogue('file', this.files[0]); this.value=''"></label>
+      <span class="sub" id="st2">空闲</span>
+    </div>
+    <div id="bubbles"></div>
+    <div class="meta" id="dlg-done"></div>
+  </div>
+</section>
+
+<!-- ============ 接口三 ============ -->
+<section class="panel" id="p2">
+  <div class="card">
+    <h2>接口三（A）声纹注册与音色克隆 <span class="tag">POST /tts/v1/audio/voices</span><span class="tag">multipart</span></h2>
+    <div class="desc">录制 2–15 秒参考音频（或选本地音频文件），注册后即成可复刻音色（火山 Seed-ICL 2.0）。
+      注意：每账号音色配额 10 个，配额已满请先删除。</div>
+    <div class="row">
+      <button class="act" id="btn-rec" onclick="toggleRec()">开始录制</button>
+      <span class="timer" id="rec-timer"></span>
+      <span class="sub" id="rec-info">未录制</span>
+      <label class="act ghost" style="display:inline-block">或选择文件
+        <input type="file" accept="audio/*" style="display:none" id="ref-file"
+               onchange="onRefFile(this.files[0])"></label>
+    </div>
+    <canvas id="refcanvas"></canvas>
+    <div class="row">
+      <input type="text" id="voice-name" placeholder="音色名（英文/数字/下划线）" style="width:240px">
+      <button class="act" id="btn-clone" onclick="cloneVoice()">注册复刻音色</button>
+      <span class="sub" id="clone-st"></span>
+    </div>
+    <div id="clone-result" class="meta"></div>
+  </div>
+  <div class="card">
+    <h2>接口三（B）克隆合成 <span class="tag">POST /tts/v1/audio/speech</span></h2>
+    <div class="row">
+      <select id="voice-sel" style="width:260px"><option>— 点击刷新音色列表 —</option></select>
+      <select id="tts-model" style="width:170px" title="合成后端">
+        <option value="qwen-tts-1.7b" selected>本地 Qwen3-TTS-1.7B</option>
+        <option value="seed-iclv2">火山 seed-iclv2</option>
+      </select>
+      <button class="mini" onclick="listVoices()">刷新</button>
+      <button class="mini" onclick="delVoice()">删除选中</button>
+    </div>
+    <textarea id="tts-text" placeholder="输入要合成的文本…">本地网页克隆合成验证，成功。</textarea>
+    <div class="row">
+      <button class="act" onclick="speak()">合成并播放</button>
+      <span class="sub" id="tts-st"></span>
+    </div>
+    <audio id="player" controls></audio>
+    <div class="meta" id="voices-note"></div>
+  </div>
+</section>
+
+<div class="card">
+  <h2>事件日志 <button class="mini" onclick="document.getElementById('log').textContent=''">清空</button></h2>
+  <div id="log">（页面就绪。API Key 已从 localStorage 读取，修改后自动保存。HTTP 走本地 /proxy，WS 直连 wss://amphion.top）</div>
+</div>
+</main>
+<script>
+/* ================= 通用 ================= */
+const $ = id => document.getElementById(id);
+const UPSTREAM_HTTP = '/proxy';               // 本地代理 -> https://amphion.top
+const WS_HOST = 'wss://amphion.top';          // WS 直连（不受 CORS 限制）
+const SR = 16000, FRAME = 3200;               // 16k s16le，100ms/帧(3200B)
+const SPK_COLORS = ['var(--spk1)', 'var(--spk2)', 'var(--spk3)', 'var(--spk4)'];
+
+let API_KEY = localStorage.getItem('amphion_key') || '';  // Key 不随代码分发：首次使用请在页面输入框填写
+$('apikey').value = API_KEY;
+$('apikey').onchange = () => { API_KEY = $('apikey').value.trim();
+  localStorage.setItem('amphion_key', API_KEY); log('API Key 已保存到 localStorage'); };
+
+function log(msg, cls) {
+  const d = $('log'), t = new Date().toTimeString().slice(0, 8);
+  const line = document.createElement('div');
+  if (cls) line.className = 'l-' + cls;
+  line.textContent = `[${t}] ${msg}`;
+  d.appendChild(line); d.scrollTop = d.scrollHeight;
+}
+/* 调试日志：演示模式（默认开）下隐藏中间过程，只保留关键结果与错误 */
+function dlog(msg, cls) { if (!$('demo-mode').checked) log(msg, cls); }
+function switchTab(i, btn) {
+  document.querySelectorAll('.panel').forEach((p, k) => p.classList.toggle('active', k === i));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}
+async function api(path, opts = {}) {
+  opts.headers = Object.assign({'X-API-Key': API_KEY}, opts.headers || {});
+  const r = await fetch(UPSTREAM_HTTP + path, opts);
+  const ct = r.headers.get('content-type') || '';
+  const body = ct.includes('json') ? await r.json() : await r.blob();
+  if (!r.ok) throw Object.assign(new Error(typeof body === 'object' && body.detail
+    ? (typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)) : 'HTTP ' + r.status), {status: r.status, body});
+  return body;
+}
+async function checkHealth() {
+  $('health-txt').textContent = '检查中…'; $('health-dot').style.background = '#666';
+  try {
+    const h = await api('/asr/health');
+    $('health-dot').style.background = 'var(--ok)';
+    $('health-txt').textContent = '网关正常 · uptime ' + Math.round((h.uptime_seconds || 0) / 3600) + 'h';
+    log('/asr/health: ' + JSON.stringify(h), 'ok');
+  } catch (e) {
+    if (e.status === 500) {   // 网关进程在线，仅健康检查探测的部分上游后端降级
+      $('health-dot').style.background = 'var(--warn)';
+      $('health-txt').textContent = '网关在线 · 部分后端维护中（三模块功能实测可用）';
+      log('/asr/health 返回 500（其探测的 ASR 后端池降级），网关本身在线；流式转写/多人分离/克隆合成走独立链路不受影响', 'evt');
+    } else {
+      $('health-dot').style.background = 'var(--err)';
+      $('health-txt').textContent = '网关异常';
+      log('health 失败: ' + e.message, 'err');
+    }
+  }
+}
+
+/* ================= 音频管线 ================= */
+function floatTo16(f32) {                     // Float32 -> Int16
+  const out = new Int16Array(f32.length);
+  for (let i = 0; i < f32.length; i++) {
+    const s = Math.max(-1, Math.min(1, f32[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  } return out;
+}
+function resampleTo16k(f32, from) {           // 线性插值重采样
+  if (from === SR) return f32;
+  const ratio = from / SR, n = Math.floor(f32.length / ratio);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) { const p = i * ratio, j = Math.floor(p), f = p - j;
+    out[i] = f32[j] * (1 - f) + (f32[j + 1] || 0) * f; }
+  return out;
+}
+function wavEncode(pcmChunks) {               // Int16Array[] -> WAV Blob
+  const total = pcmChunks.reduce((s, c) => s + c.length, 0);
+  const buf = new ArrayBuffer(44 + total * 2), v = new DataView(buf);
+  const ws = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  ws(0, 'RIFF'); v.setUint32(4, 36 + total * 2, true); ws(8, 'WAVE');
+  ws(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, SR, true); v.setUint32(28, SR * 2, true); v.setUint16(32, 2, true);
+  v.setUint16(34, 16, true); ws(36, 'data'); v.setUint32(40, total * 2, true);
+  let o = 44; for (const c of pcmChunks) { for (let i = 0; i < c.length; i++, o += 2) v.setInt16(o, c[i], true); }
+  return new Blob([buf], {type: 'audio/wav'});
+}
+/* 麦克风：AudioContext(16k) + ScriptProcessor；onChunk(Int16Array)；chunks 可选收集（录制参考音频） */
+class Mic {
+  constructor() { this.ctx = null; this.stream = null; this.proc = null; }
+  async start(onChunk, collect) {
+    this.stream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: false, noiseSuppression: false}});
+    try { this.ctx = new AudioContext({sampleRate: SR}); }
+    catch (e) { this.ctx = new AudioContext(); log('16k AudioContext 不可用，退回 ' + this.ctx.sampleRate + 'Hz 手动重采样'); }
+    const src = this.ctx.createMediaStreamSource(this.stream);
+    this.proc = this.ctx.createScriptProcessor(2048, 1, 1);
+    this.proc.onaudioprocess = ev => {
+      let pcm = floatTo16(resampleTo16k(ev.inputBuffer.getChannelData(0), this.ctx.sampleRate));
+      if (collect) collect.push(pcm);
+      onChunk(pcm);
+    };
+    src.connect(this.proc); this.proc.connect(this.ctx.destination);
+  }
+  stop() { try { this.proc && this.proc.disconnect(); } catch (e) {}
+    try { this.stream && this.stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+    try { this.ctx && this.ctx.close(); } catch (e) {}
+    this.proc = this.stream = this.ctx = null; }
+}
+/* 文件 -> 16k Int16 PCM（decodeAudioData 任意格式） */
+async function fileToPCM(file) {
+  const ab = await file.arrayBuffer();
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const buf = await ctx.decodeAudioData(ab); ctx.close();
+  const ch = buf.getChannelData(0);
+  return floatTo16(resampleTo16k(ch, buf.sampleRate));
+}
+/* 按 1× 实时速率发送 PCM：onFrame(ArrayBuffer|Int16Array) 每 100ms 一帧 */
+async function streamPCM(pcm, onFrame, stopFlag) {
+  for (let i = 0; i < pcm.length; i += FRAME) {
+    if (stopFlag && stopFlag()) return;
+    onFrame(pcm.subarray(i, i + FRAME));
+    await new Promise(r => setTimeout(r, 100));   // 1× 速率（1024 字节/样本=2B，3200B=100ms）
+  }
+}
+/* ================= 接口一 流式转写 ================= */
+let ws1 = null, mic1 = null, stopFlag1 = false, t1 = 0;
+/* ---- 前端 VAD 自动判停（电话亭反馈1：停顿后自动结束并跳转接口二） ---- */
+let vad = {hasSpeech: false, speechMs: 0, silenceMs: 0}, autoTimer = null;
+function autoFlowOn() { return $('auto-flow').checked; }
+function vadSilenceSec() { return Math.min(10, Math.max(1, parseFloat($('vad-silence').value) || 2.5)); }
+/* 每帧 PCM 计 RMS 能量：说过话（>=0.8s）后静音超阈值 -> 自动收尾 */
+function vadFeed(pcm) {
+  if (!autoFlowOn() || autoTimer) return;
+  let sum = 0; for (let i = 0; i < pcm.length; i++) sum += pcm[i] * pcm[i];
+  const rms = Math.sqrt(sum / pcm.length) / 32768, durMs = pcm.length / SR * 1000;
+  if (rms > 0.015) {
+    vad.speechMs += durMs; vad.silenceMs = 0;
+    if (!vad.hasSpeech && vad.speechMs >= 800) vad.hasSpeech = true;
+  } else if (vad.hasSpeech) {
+    vad.silenceMs += durMs;
+    if (vad.silenceMs >= vadSilenceSec() * 1000) triggerAutoFinish();
+  }
+}
+function triggerAutoFinish() {
+  let n = 3;
+  $('btn-cancel-auto').style.display = '';
+  $('st1').textContent = `检测到停顿，${n} 秒后自动结束并进入多人分离…`;
+  log('一 检测到停顿（静音 ' + vadSilenceSec() + 's），3 秒后自动收尾', 'evt');
+  autoTimer = setInterval(() => {
+    n--;
+    if (n <= 0) { cancelAutoFinish(); stopRealtime(); return; }
+    $('st1').textContent = `检测到停顿，${n} 秒后自动结束并进入多人分离…`;
+  }, 1000);
+}
+function cancelAutoFinish() {
+  if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+  $('btn-cancel-auto').style.display = 'none';
+}
+function setUI1(rec) {
+  $('btn-mic1').disabled = rec; $('btn-stop1').disabled = !rec;
+  $('st1').textContent = rec ? '录音中' : '空闲';
+}
+function b64frame(f) {   // Int16Array 帧 -> base64
+  const u8 = new Uint8Array(f.buffer, f.byteOffset, f.byteLength);
+  let s = ''; for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+  return btoa(s);
+}
+async function startRealtime(source, file) {
+  if (ws1) return;
+  $('final-box').style.display = 'none'; $('partial').textContent = '（连接中…）';
+  setUI1(true); stopFlag1 = false; t1 = Date.now();
+  cancelAutoFinish(); vad = {hasSpeech: false, speechMs: 0, silenceMs: 0};
+  try {
+    const ws = new WebSocket(`${WS_HOST}/asr/v1/realtime?api_key=${encodeURIComponent(API_KEY)}`);
+    ws1 = ws;
+    ws.onopen = async () => {
+      log('一 WS 已连接（api_key 直连）', 'ok');
+      ws.send(JSON.stringify({type: 'session.update', session: {language: 'auto'}}));
+      const sendJSON = f => { if (ws.readyState === 1) ws.send(JSON.stringify(
+        {type: 'input_audio_buffer.append', audio: b64frame(f)})); };
+      if (source === 'mic') {
+        mic1 = new Mic();
+        mic1.start(pcm => { vadFeed(pcm); for (let i = 0; i < pcm.length; i += FRAME) sendJSON(pcm.subarray(i, i + FRAME)); })
+          .catch(e => { log('一 麦克风失败: ' + e.message, 'err'); stopRealtime(); });
+      } else {
+        log('一 文件解码: ' + file.name);
+        const pcm = await fileToPCM(file);
+        $('st1').textContent = `回放中（${(pcm.length / SR).toFixed(1)}s）`;
+        await streamPCM(pcm, sendJSON, () => stopFlag1);
+        if (!stopFlag1) stopRealtime();     // 文件播完自动收尾
+      }
+    };
+    ws.onmessage = ev => {
+      let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
+      const t = d.type || '';
+      if (t === 'transcription.delta') {
+        $('partial').textContent = d.text || d.delta || '';          // 全量累积文本，直接覆盖
+      } else if (t === 'transcription.done') {
+        $('final-box').style.display = 'block';
+        $('final-text').textContent = d.text || '';
+        const secs = d.usage && d.usage.seconds ? d.usage.seconds.toFixed(1) : '?';
+        $('final-meta').textContent = `计费时长 ${secs}s · 端到端耗时 ${((Date.now() - t1) / 1000).toFixed(1)}s`;
+        log('一 done: ' + (d.text || ''), 'ok');
+        if (autoFlowOn()) setTimeout(() => {          // 电话亭自动流转：转写完成 -> 接口二
+          document.querySelectorAll('nav button')[1].click();
+          log('一 自动流转：已切换到接口二并开始录音', 'evt');
+          startDialogue('mic');
+        }, 600);
+      } else if (t === 'error') {
+        log('一 服务端错误: ' + JSON.stringify(d), 'err');
+      } else if (t !== 'transcription.partial') {
+        dlog('一 EVT: ' + JSON.stringify(d).slice(0, 300), 'evt');
+      }
+    };
+    ws.onclose = ev => { log(`一 WS 关闭 (${ev.code}${ev.reason ? ' ' + ev.reason : ''})`); cleanup1(); };
+    ws.onerror = () => log('一 WS 错误', 'err');
+  } catch (e) { log('一 ' + e.message, 'err'); cleanup1(); }
+}
+function stopRealtime() {
+  cancelAutoFinish();
+  stopFlag1 = true;
+  if (mic1) { mic1.stop(); mic1 = null; }
+  if (ws1 && ws1.readyState === 1) ws1.send(JSON.stringify({type: 'input_audio_buffer.commit', final: true}));
+  setUI1(false);
+}
+function cleanup1() { if (mic1) { mic1.stop(); mic1 = null; } ws1 = null; setUI1(false); }
+/* ================= 接口二 多人说话人分离 ================= */
+let ws2 = null, mic2 = null, stopFlag2 = false, curBub = null;
+function setUI2(rec) {
+  $('btn-mic2').disabled = rec; $('btn-stop2').disabled = !rec;
+  $('st2').textContent = rec ? '录音中' : '空闲';
+}
+function bubble(d, pending) {
+  if (pending && curBub && curBub.dataset.seg === (d.segment_id || '')) {
+    curBub.querySelector('.txt').textContent = d.text || ''; return curBub;
+  }
+  const b = document.createElement('div');
+  b.className = 'bub' + (pending ? ' pending' : '');
+  b.dataset.seg = d.segment_id || ('seg-' + Date.now());
+  const who = pending ? '正在确认说话人…'
+    : `说话人 ${(d.role_index || 0) + 1}${d.speaker_name && d.speaker_name !== 'null' ? ' · ' + d.speaker_name : ''}`;
+  const color = pending ? 'var(--dim)' : SPK_COLORS[(d.role_index || 0) % SPK_COLORS.length];
+  b.innerHTML = `<div class="who" style="color:${color}">${who}</div><div class="txt"></div>`;
+  b.querySelector('.txt').textContent = d.text || '';
+  $('bubbles').appendChild(b); $('bubbles').scrollTop = 1e9;
+  return b;
+}
+async function getEphemeralToken() {
+  const r = await api('/auth/v1/ephemeral-tokens', {method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({resource: 'asr.target_dialogue', expires_in_seconds: 180,
+      max_session_seconds: 180})});
+  const tok = r.access_token || r.token || (typeof r === 'string' ? r : null);
+  if (!tok) throw new Error('响应无 access_token 字段: ' + JSON.stringify(r).slice(0, 120));
+  return tok;
+}
+async function startDialogue(source, file) {
+  if (ws2) return;
+  $('bubbles').innerHTML = ''; $('dlg-done').textContent = ''; curBub = null;
+  setUI2(true); stopFlag2 = false;
+  try {
+    let token = null;
+    try { token = await getEphemeralToken(); dlog('二 ephemeral token 已签发（经本地代理）', 'ok'); }
+    catch (e) { dlog('二 token 签发失败（' + e.message + '），退回 ?api_key= 直连', 'evt'); }
+    const ws = new WebSocket(`${WS_HOST}/asr/v1/target-dialogue${token ? '' : '?api_key=' + encodeURIComponent(API_KEY)}`);
+    ws2 = ws;
+    ws.onopen = async () => {
+      log('二 WS 已连接（' + (token ? 'token' : 'api_key') + ' 模式）', 'ok');
+      if (token) ws.send(JSON.stringify({type: 'session.authenticate', access_token: token}));
+      ws.send(JSON.stringify({type: 'session.update', session: {
+        filter: {mode: 'open'},
+        participants: [],
+        audio: {sample_rate_hz: SR},
+        recognition: {mode: 'role_separation'}}}));
+      const sendBin = f => { if (ws.readyState === 1)
+        ws.send(new Uint8Array(f.buffer, f.byteOffset, f.byteLength)); };
+      if (source === 'mic') {
+        mic2 = new Mic();
+        mic2.start(pcm => { for (let i = 0; i < pcm.length; i += FRAME) sendBin(pcm.subarray(i, i + FRAME)); })
+          .catch(e => { log('二 麦克风失败: ' + e.message, 'err'); stopDialogue(); });
+      } else {
+        log('二 文件解码: ' + file.name);
+        const pcm = await fileToPCM(file);
+        $('st2').textContent = `回放中（${(pcm.length / SR).toFixed(1)}s）`;
+        await streamPCM(pcm, sendBin, () => stopFlag2);
+        if (!stopFlag2) stopDialogue();
+      }
+    };
+    ws.onmessage = ev => {
+      let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
+      const t = d.type || '';
+      if (t === 'transcription.partial') { curBub = bubble(d, true); }
+      else if (t === 'transcription.final') { curBub = null; bubble(d, false); log('二 final: ' + (d.text || ''), 'ok'); }
+      else if (t === 'session.done') {
+        const s = d.duration_seconds;
+        $('dlg-done').textContent = `会话完成 · 时长 ${typeof s === 'number' ? s.toFixed(1) : s}s · 识别角色 ${d.identified_roles} · 压制 ${d.suppressed_roles}`;
+      }
+      else if (t === 'error') log('二 服务端错误: ' + JSON.stringify(d), 'err');
+      else dlog('二 EVT: ' + JSON.stringify(d).slice(0, 300), 'evt');
+    };
+    ws.onclose = ev => { log(`二 WS 关闭 (${ev.code})`); cleanup2(); };
+    ws.onerror = () => log('二 WS 错误', 'err');
+  } catch (e) { log('二 ' + e.message, 'err'); cleanup2(); }
+}
+function stopDialogue() {
+  stopFlag2 = true;
+  if (mic2) { mic2.stop(); mic2 = null; }
+  if (ws2 && ws2.readyState === 1) ws2.send(JSON.stringify({type: 'input_audio_buffer.commit', final: true}));
+  setUI2(false);
+}
+function cleanup2() { if (mic2) { mic2.stop(); mic2 = null; } ws2 = null; setUI2(false); }
+/* ================= 接口三 声纹注册与克隆 ================= */
+let recMic = null, recChunks = [], recTimer = null, recStart = 0, refBlob = null;
+function drawWave(chunks) {
+  const cv = $('refcanvas'), ctx = cv.getContext('2d');
+  cv.width = cv.offsetWidth; cv.height = 46;
+  ctx.clearRect(0, 0, cv.width, cv.height); ctx.fillStyle = '#4f8cff';
+  const all = chunks.flat(), step = Math.max(1, Math.floor(all.length / cv.width));
+  for (let x = 0; x < cv.width; x++) {
+    let m = 0; for (let i = x * step; i < (x + 1) * step && i < all.length; i++)
+      m = Math.max(m, Math.abs(all[i]) / 32768);
+    const h = Math.max(1, m * cv.height);
+    ctx.fillRect(x, (cv.height - h) / 2, 1, h);
+  }
+}
+async function toggleRec() {
+  if (recMic) {   // 停止
+    clearInterval(recTimer); recMic.stop(); recMic = null;
+    const dur = recChunks.reduce((s, c) => s + c.length, 0) / SR;
+    $('btn-rec').textContent = '开始录制'; $('rec-timer').textContent = '';
+    if (dur < 1) { $('rec-info').textContent = '太短（<1s），请重录'; refBlob = null; return; }
+    refBlob = wavEncode(recChunks);
+    $('rec-info').textContent = `已录 ${dur.toFixed(1)}s · ${(refBlob.size / 1024).toFixed(0)}KB WAV`;
+    drawWave(recChunks); log(`三 参考音频已就绪（${dur.toFixed(1)}s）`, 'ok');
+    return;
+  }
+  recChunks = []; refBlob = null;
+  recMic = new Mic();
+  try { await recMic.start(() => {}, recChunks); }
+  catch (e) { recMic = null; $('rec-info').textContent = '麦克风失败：' + e.message; return; }
+  $('btn-rec').textContent = '停止录制'; recStart = Date.now();
+  recTimer = setInterval(() => { const s = (Date.now() - recStart) / 1000;
+    $('rec-timer').textContent = s.toFixed(1) + 's' + (s > 15 ? '（已超 15s，请停止）' : ''); }, 100);
+}
+async function onRefFile(f) {
+  try {
+    const pcm = await fileToPCM(f);
+    refBlob = wavEncode([pcm]);
+    $('rec-info').textContent = `文件 ${f.name} · ${(pcm.length / SR).toFixed(1)}s · ${(refBlob.size / 1024).toFixed(0)}KB`;
+    drawWave([pcm]); log(`三 参考文件已解码（${(pcm.length / SR).toFixed(1)}s）`, 'ok');
+  } catch (e) { $('rec-info').textContent = '解码失败：' + e.message; log('三 文件解码失败: ' + e.message, 'err'); }
+}
+async function cloneVoice() {
+  const name = $('voice-name').value.trim();
+  if (!refBlob) return log('三 请先录制或选择参考音频', 'err');
+  if (!/^[A-Za-z0-9_\-]{1,64}$/.test(name)) return log('三 音色名需为英文/数字/下划线', 'err');
+  $('clone-st').textContent = '上传复刻中…'; $('btn-clone').disabled = true;
+  const t0 = performance.now();
+  try {
+    const fd = new FormData();
+    fd.append('voice_name', name);
+    fd.append('audio_file', refBlob, name + '.wav');
+    const r = await api('/tts/v1/audio/voices', {method: 'POST', body: fd});
+    const dt = ((performance.now() - t0) / 1000).toFixed(1);
+    $('clone-result').textContent = `注册成功（耗时 ${dt}s）：` + JSON.stringify(r).slice(0, 400);
+    log('三 clone: ' + JSON.stringify(r).slice(0, 300), 'ok');
+    listVoices(name);
+  } catch (e) {
+    $('clone-result').textContent = '失败：' + e.message;
+    log('三 clone 失败: ' + e.message, 'err');
+  }
+  $('clone-st').textContent = ''; $('btn-clone').disabled = false;
+}
+async function listVoices(prefer) {
+  try {
+    const r = await api('/tts/v1/audio/voices');
+    const voices = r.voices || r.items || (Array.isArray(r) ? r : []);
+    const sel = $('voice-sel'); sel.innerHTML = '';
+    voices.forEach(v => { const n = v.voice_name || v.name || v;
+      const o = document.createElement('option'); o.value = n; o.textContent = n;
+      if (n === prefer) o.selected = true; sel.appendChild(o); });
+    $('voices-note').textContent = `共 ${voices.length} 个音色（账号配额 10）。含系统音色与已克隆音色。`;
+    log(`三 音色列表 ${voices.length} 个已刷新`, 'ok');
+  } catch (e) { log('三 列表失败: ' + e.message, 'err'); }
+}
+async function speak() {
+  const voice = $('voice-sel').value, text = $('tts-text').value.trim();
+  if (!voice || voice.startsWith('—')) return log('三 请先刷新并选择音色', 'err');
+  if (!text) return log('三 请输入合成文本', 'err');
+  $('tts-st').textContent = '合成中…';
+  const t0 = performance.now();
+  try {
+    const blob = await api('/tts/v1/audio/speech', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model: $('tts-model').value, voice: voice, input: text,
+        response_format: 'wav', sample_rate: 24000})});
+    const dt = ((performance.now() - t0) / 1000).toFixed(1);
+    $('player').src = URL.createObjectURL(blob);
+    $('player').play();
+    $('tts-st').textContent = `完成 ${(blob.size / 1024).toFixed(0)}KB · 合成耗时 ${dt}s · 后端 ${$('tts-model').value}`;
+    log(`三 合成成功 ${voice} -> ${(blob.size / 1024).toFixed(0)}KB WAV（${$('tts-model').value}），已自动播放`, 'ok');
+  } catch (e) { $('tts-st').textContent = '失败：' + e.message; log('三 合成失败: ' + e.message, 'err'); }
+}
+async function delVoice() {
+  const voice = $('voice-sel').value;
+  if (!voice || voice.startsWith('—')) return;
+  if (!confirm(`删除音色 ${voice}？`)) return;
+  try { await api('/tts/v1/audio/voices/' + encodeURIComponent(voice), {method: 'DELETE'});
+    log('三 已删除 ' + voice, 'ok'); listVoices(); }
+  catch (e) { log('三 删除失败: ' + e.message, 'err'); }
+}
+
+/* ================= init ================= */
+checkHealth(); listVoices();
+log('Demo 就绪：三个 Tab 对应三类接口；麦克风需在浏览器授权。');
+
+
+
+
+</script>
+</body>
+</html>
+
