@@ -51,7 +51,7 @@ open http://localhost:8766/
 | 项 | 值 |
 |---|---|
 | 访问地址 | **https://amphion-gjh.amphiondev.com/** |
-| 部署机器 | 华为云 BMS `bms910`（鲲鹏 CPU + 8 × 昇腾 910B3 NPU）。**本 Demo 为纯 CPU 服务（systemd `amphion-gjh.service`），不占用任何 NPU 卡**——语音推理负载全部由远端 amphion.top 集群承担；同机 NPU 0–3 为生产 ASR 服务占用（与本 Demo 无关），NPU 4–7 为训练专用 |
+| 部署机器 | 华为云 BMS `bms910`**本 Demo 为纯 CPU 服务（systemd `amphion-gjh.service`） |
 | 部署目录 | `/opt/amphion-gjh`（`frontend/dist` + `server/`） |
 | 应用服务 | `uvicorn main:app`（FastAPI，监听 `127.0.0.1:8766`，托管前端静态文件并提供 `/proxy` 网关分流） |
 | 入口反代 | Caddy（配置：`/etc/dingqiao-asr-debugger/Caddyfile`）——`amphion-gjh.amphiondev.com` → `127.0.0.1:8766`，HTTPS 证书自动签发（ACME） |
