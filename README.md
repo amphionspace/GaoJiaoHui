@@ -46,6 +46,27 @@ open http://localhost:8766/
 | 命令行脚本（`local_demo.py` / `smoke_*.py`） | `export AMPHION_API_KEY=sk-...`（脚本启动时校验，缺失即提示退出） |
 - 功能与旧版 demo.html 完全等价（VAD 判停 / 自动流转 / 演示模式 / 双合成后端全部保留）
 
+## 线上部署
+
+| 项 | 值 |
+|---|---|
+| 访问地址 | **https://amphion-gjh.amphiondev.com/** |
+| 部署机器 | 华为云 BMS `bms910`（鲲鹏 CPU + 8 × 昇腾 910B3 NPU；生产 ASR 服务同机运行，占用 NPU 0–3） |
+| 部署目录 | `/opt/amphion-gjh`（`frontend/dist` + `server/`） |
+| 应用服务 | `uvicorn main:app`（FastAPI，监听 `127.0.0.1:8766`，托管前端静态文件并提供 `/proxy` 网关分流） |
+| 入口反代 | Caddy（配置：`/etc/dingqiao-asr-debugger/Caddyfile`）——`amphion-gjh.amphiondev.com` → `127.0.0.1:8766`，HTTPS 证书自动签发（ACME） |
+
+**请求链路（amphion.top cn-test 迁移期双网关架构）：**
+
+- HTTP API：浏览器 → Caddy → FastAPI `/proxy/*` → `https://amphion.top`（其中 `tts/*`、`asr/health` 在 `server/main.py` 中分流至 legacy 网关）
+- WebSocket：
+  - `target-dialogue`（多人分离）：浏览器直连 `wss://amphion.top`（新集群）
+  - `realtime`（流式转写）：迁移期经 Caddy `/ws-legacy/*` 反代至 legacy 网关（Host/SNI 仍为 `amphion.top`）
+- legacy 网关为迁移期**临时依赖**：平台完成迁移后应移除上述分流逻辑，统一走新集群
+
+**更新部署**：本机 `npm run build` 后，将 `frontend/dist` 与 `server/` rsync 至 bms910 的 `/opt/amphion-gjh/`，重启 uvicorn 生效。
+
+
 ## 模块一「未来手记旅程」（BoothJourney，对应设计稿 01–08）
 
 按电话亭 8 屏设计稿实现的**旅程状态机**（Tab1；原流式转写调试界面移至 Tab2「调试·流式转写」）：
