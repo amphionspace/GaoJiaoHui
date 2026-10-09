@@ -1,8 +1,7 @@
 # 电话亭语音 Demo
 
-本地网页交互 Demo，演示三类 Amphion 语音接口。针对「电话亭体验反馈 1.0」已完成第一轮前端改动。
-
-## 架构：前后端分离（Vue 3 + FastAPI，2026-09-30 重构）
+本地网页交互 Demo，演示三类 Amphion 语音接口。
+## 架构：前后端分离（Vue 3 + FastAPI）
 
 ```
 gaojiao/
@@ -51,7 +50,7 @@ open http://localhost:8766/
 | 项 | 值 |
 |---|---|
 | 访问地址 | **https://amphion-gjh.amphiondev.com/** |
-| 部署机器 | 华为云 BMS `bms910`**本 Demo 为纯 CPU 服务（systemd `amphion-gjh.service`） |
+| 部署机器 | 华为云 BMS `bms910`本 Demo 为纯 CPU 服务（systemd `amphion-gjh.service`） |
 | 部署目录 | `/opt/amphion-gjh`（`frontend/dist` + `server/`） |
 | 应用服务 | `uvicorn main:app`（FastAPI，监听 `127.0.0.1:8766`，托管前端静态文件并提供 `/proxy` 网关分流） |
 | 入口反代 | Caddy（配置：`/etc/dingqiao-asr-debugger/Caddyfile`）——`amphion-gjh.amphiondev.com` → `127.0.0.1:8766`，HTTPS 证书自动签发（ACME） |
@@ -93,7 +92,7 @@ open http://localhost:8766/
 
 ```bash
 cd gaojiao
-python3 demo_server.py        # 默认 127.0.0.1:8765
+python3 demo_server.py        
 open http://localhost:8765/
 ```
 
