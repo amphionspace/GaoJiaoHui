@@ -1,163 +1,68 @@
-# 电话亭语音 Demo
+# 未来来电 demo1 · Amphion 语音电话亭
 
-本地网页交互 Demo，演示三类 Amphion 语音接口。针对「电话亭体验反馈 1.0」已完成第一轮前端改动。
+Vue 3 前端与 FastAPI 后端，包含未来手记旅程、多人对话工作台、声音克隆对话。
 
-## 架构：前后端分离（Vue 3 + FastAPI，2026-09-30 重构）
+未来手记使用完整讲述生成摘要与来自未来自己的回信；在第一次自然讲述中采集参考声音，不要求用户去另一模块重录。声音必须来自本次已注册音色，失败时保留手记并明确提示，不回退到系统机械人声。
 
-```
-gaojiao/
-├── frontend/                     # 前端：Vite + Vue 3（SFC 组件化）
-│   ├── src/core/                 # 无 UI 依赖的核心模块（可单测/复用）
-│   │   ├── audio.js              #   Mic 类 / floatTo16 / resampleTo16k / wavEncode / fileToPCM / streamPCM / b64frame
-│   │   ├── vad.js                #   createVad()：RMS 能量判停状态机（阈值/静音秒数/触发回调全参数化）
-│   │   ├── api.js                #   api() 客户端（/proxy 同源转发）+ getEphemeralToken()
-│   │   └── store.js              #   全局状态（API Key / 演示模式 / 日志总线 log/dlog）
-│   ├── src/components/           # 关键前端组件（每模块独立）
-│   │   ├── ModuleAsr.vue         #   接口一：流式转写 + VAD 自动判停 + 3s 倒计时 + 自动流转(emit)
-│   │   ├── ModuleDialogue.vue    #   接口二：多人分离（token 优先→api_key 退回，pending/final 气泡）
-│   │   ├── ModuleClone.vue       #   接口三：录音/波形/注册 + 合成（qwen/火山后端下拉）
-│   │   ├── HealthBadge.vue       #   网关健康三级显示（绿 200 / 黄 500 / 红不可达）
-│   │   ├── WaveCanvas.vue        #   参考音频波形 canvas
-│   │   └── LogPanel.vue          #   事件日志面板（着色/滚底/清空）
-│   └── src/App.vue               # 壳：header + Tab + 组件编排（自动流转在此联动）
-├── server/main.py                # 后端：FastAPI（/proxy 转发 + 托管 dist + /api/config）
-├── demo.html + demo_server.py    # 旧版单文件（保留作回退，不再迭代）
+## 当前交付状态
+
+2026-10-20：当前发布候选版本为 **demo1**，分支为 `codex/demo1`。包含红色写实电话首页、竖屏适配、50 字以内的未来回信、首次讲述采集声音、打印手记、会话取消与失败重试。其他工作台和已有修改保留。线上部署状态与验收范围见 [demo1 发布记录](docs/DEMO1.md)。
+
+**TTS 已接入百炼适配器，但仍需用本人录音试听验收音色相似度。** 本地启动脚本会使用百炼作为未来手记的 TTS 提供方；原网关兼容协议仍保留，可通过 `JOURNEY_TTS_PROVIDER=legacy` 切回。特定型号打印机的出纸反馈也尚未接入，目前使用浏览器原生打印。详见 [交付检查](docs/DELIVERY.md) 和 [TTS 试用选择](docs/TTS-OPTIONS.md)。
+
+## 安装与启动
+
+使用 Node.js 22.12+、Python 3.11。本机既有 Python 3.9 环境也可运行本轮代码。
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r server/requirements.txt
+npm --prefix frontend ci
+.venv/bin/python scripts/run_local.py
 ```
 
-**运行（生产，单端口 8766）：**
+浏览器打开 <http://127.0.0.1:5173/>。启动脚本统一运行前端 5173 与后端 8767；任一端退出即停止另一端，端口被占用时明确报错，不悄悄换入口。终端退出或电脑休眠后本地服务会停止，重新运行该脚本即可。
 
-```bash
-cd gaojiao/frontend && npm install && npm run build   # 产出 dist/
-python3 -m pip install --user fastapi 'uvicorn[standard]' httpx   # 一次性
-cd gaojiao && python3 server/main.py
-open http://localhost:8766/
+生产使用构建产物，由后端单端口提供：
+
+```sh
+npm --prefix frontend run build
+HOST=127.0.0.1 PORT=8766 .venv/bin/python -m server.main
 ```
 
-**运行（开发，前端热更新）：** 终端 1 `python3 server/main.py`（8766）；终端 2 `cd frontend && npm run dev`（Vite 5173，`/proxy` 自动代理到 8766）。
+生产入口需 HTTPS 反向代理，才能让非 localhost 浏览器使用麦克风。不要将 Vite 开发服务器作为公网服务。
 
-- HTTP 接口经后端 `/proxy/*` 转发到 `https://amphion.top`（绕开 CORS）；WebSocket 浏览器直连 `wss://amphion.top`
-- API Key 在页面右上角输入框输入（自动保存 localStorage；**Key 不随代码分发**，首次使用需向团队索取联调 Key）
+## 配置
 
-### API Key 配置（运行时输入，代码中不含任何 Key）
+- 右上角“连接设置”允许体验者填写自己的语音网关密钥，保存在当前浏览器，刷新后保留；不得写入仓库或前端构建。它不是服务器登录密码，也不是百炼或 DeepSeek 的服务端密钥。
+- 文本模型使用根目录 `.env.journey.json`，字段为 `url`、`model`、`api_key`，结构见 [示例](server/journey-config.example.json)。该文件被 Git 忽略，建议权限 600。不要把实际密钥发到聊天或提交记录中。
+- 也可使用 `JOURNEY_LLM_URL`、`JOURNEY_LLM_MODEL`、`JOURNEY_LLM_API_KEY`，环境变量优先；模型配置每次请求读取。
+- 百炼 TTS 使用根目录 `.env.bailian.json`，保存业务空间、北京地域地址和服务端 API Key，文件被 Git 忽略且应为权限 600。当前适配 `qwen-voice-enrollment` 创建临时音色，再用同一 `qwen3.5-omni-plus` 模型流式合成本人声音；密钥不会下发到浏览器。
+- `JOURNEY_TTS_PROVIDER=bailian` 启用百炼适配器，`JOURNEY_TTS_PROVIDER=legacy` 使用原有 `/v1/audio/voices` 网关协议。提供方只影响未来手记 TTS，不改变 ASR 与文本接口。
+- 语音 HTTP/WS 地址见 [运行配置示例](deploy/runtime.env.example)。前端启动时读取 `/api/config`，不需要为换网关重新构建。
+- `JOURNEY_TTS_URL` 指向兼容当前临时音色协议的服务；**不能直接填任意商业厂商 URL**，注册、合成和认证协议需要适配。
+- `/api/journey/compose` 与百炼声音接口必须携带有效 `X-API-Key`，通过网关临时令牌接口校验。可设置服务端 `JOURNEY_ACCESS_KEY` 改为固定访问密钥校验；ASR 仍要求有效的网关密钥。
 
-| 使用场景 | 输入方式 |
-|---|---|
-| 网页 Demo | 首次打开后在右上角「API 设置」输入框填写，保存于浏览器 localStorage |
-| 命令行脚本（`local_demo.py` / `smoke_*.py`） | `export AMPHION_API_KEY=sk-...`（脚本启动时校验，缺失即提示退出） |
-- 功能与旧版 demo.html 完全等价（VAD 判停 / 自动流转 / 演示模式 / 双合成后端全部保留）
+文本与百炼声音接口共用限流：每来源每分钟最多 30 次、每密钥每分钟 10 次。文本同时最多 2 次；单进程文本总并发最多 8 次。密钥哈希缓存 60 秒，错误响应不回显密钥或完整上游异常。限流是单进程方案，扩容前需改为共享存储。
 
-## 线上部署
+## 验证
 
-| 项 | 值 |
-|---|---|
-| 访问地址 | **https://amphion-gjh.amphiondev.com/** |
-| 部署机器 | 华为云 BMS `bms910`**本 Demo 为纯 CPU 服务（systemd `amphion-gjh.service`） |
-| 部署目录 | `/opt/amphion-gjh`（`frontend/dist` + `server/`） |
-| 应用服务 | `uvicorn main:app`（FastAPI，监听 `127.0.0.1:8766`，托管前端静态文件并提供 `/proxy` 网关分流） |
-| 入口反代 | Caddy（配置：`/etc/dingqiao-asr-debugger/Caddyfile`）——`amphion-gjh.amphiondev.com` → `127.0.0.1:8766`，HTTPS 证书自动签发（ACME） |
-
-**请求链路（amphion.top cn-test 迁移期双网关架构）：**
-
-- HTTP API：浏览器 → Caddy → FastAPI `/proxy/*` → `https://amphion.top`（其中 `tts/*`、`asr/health` 在 `server/main.py` 中分流至 legacy 网关）
-- WebSocket：
-  - `target-dialogue`（多人分离）：浏览器直连 `wss://amphion.top`（新集群）
-  - `realtime`（流式转写）：迁移期经 Caddy `/ws-legacy/*` 反代至 legacy 网关（Host/SNI 仍为 `amphion.top`）
-- legacy 网关为迁移期**临时依赖**：平台完成迁移后应移除上述分流逻辑，统一走新集群
-
-**更新部署**：本机 `npm run build` 后，将 `frontend/dist` 与 `server/` rsync 至 bms910 的 `/opt/amphion-gjh/`，重启 uvicorn 生效。
-
-
-## 模块一「未来手记旅程」（BoothJourney，对应设计稿 01–08）
-
-按电话亭 8 屏设计稿实现的**旅程状态机**（Tab1；原流式转写调试界面移至 Tab2「调试·流式转写」）：
-
-| 屏 | 状态名 | 行为 |
-|---|---|---|
-| 01 获得问题 | `idle` | 引导问题 + **三问竖排卡片**（序号/问题/小字提示，点卡即从该问开始连讲）+ 「开始讲述（从第一问）」 |
-| 02 自由讲述 | `listening` | 顶部**三问竖排清单**（已讲完 ✓ 划线/当前问高亮「正在听」）；WS 实时转写上屏「实时记录」卡；**「我说完了」按钮或语音结束语即结束本问** |
-| 03 暂时停顿 | `pause` | 静音 N 秒（默认 3s 可调）自动切安抚屏「慢慢想，我还在」；**不自动结束**，检测到声音自动回 02 |
-| 03b 下一问过渡 | `nextq` | **一问讲完即自动切入**：「✓ 第 X/3 问 · 已讲完」+ 预告下一问 + 3 秒倒计时自动开始（可点「现在就开始」跳过） |
-| 04 完成讲述 | `summarizing` | 第三问讲完 -> 合并三问全文 -> 规则式生成手记（约 1.4s；**发现 = 每问一句**，最多 3 条） |
-| 05 生成手记 | `journal` | 手记纸卡（刊头/标题/发现×N/原话/关键词）+「我想改一改 / 内容没问题」 |
-| 06 语音修改 | `editing` | 新一轮短聆听收修改指令，**静音 2s 自动应用**；高亮「标题已修改/新增」标签；可循环继续说；无麦克风时可用文本输入兜底 |
-| 07 确认打印 | `confirm` | 终版预览（无编辑标记）+ 实心主按钮「确认并打印」/「返回修改」 |
-| 08 取走手记 | `printing→done` | 模拟打印 1.2s ->「请从下方取走手记」「取走后，请挂好听筒」->「三个问题都聊完了，谢谢你」-> 重新开始 |
-
-**三问连讲（讲完即切）**：01 屏三张竖排卡 = 三个问题（`最惊喜的产品`/`一个新想法`/`今天的小故事`），点任意卡从该问开始；一问说「我说完了」即存本问全文，**自动进 03b 过渡屏，3 秒倒计时后自动开始下一问的聆听**（可点「现在就开始」跳过）；02 屏始终显示三问竖排进度清单（已讲完打勾划线、当前问高亮「正在听」）；第三问讲完不再逐问打印，而是**合并三问生成一份手记**（发现 = 每问各取一句，≤3 条；原话/关键词/标题取全文），走一次「修改→打印」，打印即旅程终点。
-
-- 手记生成/修改为 `core/journal.js` **本地规则式**（无 LLM 依赖）：发现=前两条陈述句、原话=末句、关键词=词表匹配、标题=主题模板；修改指令支持「标题改得轻松一点 / 标题改成XXX / 加一句XXX」
-- 讲述会话一条 WS 贯穿 02/03（pause 只切屏不断流）；结束语文本检测（去标点尾部匹配「我说完了」）；底部三段「讲述 — 修改 — 打印」进度随状态推进
-- 打印为演示模拟（无实体打印机）；麦克风失败时日志给出分类中文指引（见 `explainMicError`）
-
-## 运行（旧版单文件，仅维护用）
-
-```bash
-cd gaojiao
-python3 demo_server.py        # 默认 127.0.0.1:8765
-open http://localhost:8765/
+```sh
+npm --prefix frontend test
+npm --prefix frontend run build
+.venv/bin/python -m unittest discover -s server -p 'test_*.py' -v
 ```
 
-- HTTP 接口经本地 `/proxy/*` 转发到 `https://amphion.top`（绕开 CORS）
-- WebSocket 浏览器直连 `wss://amphion.top`
-- API Key 在页面右上角输入框（自动保存 localStorage，默认为公共测试 Key）
+真实模型质量检查是会消耗额度的手动命令；CI 不调用付费接口：
 
-## 对应电话亭反馈 1.0 的改动清单
+```sh
+.venv/bin/python -m server.evaluate_journey --output docs/validation/llm-local.json
+```
 
-### 反馈 1：模块一流式转写——停顿后自动停止并跳转模块二
+测试素材均为虚构，报告需人工阅读；关键词命中不能证明共情或完全忠实。当前报告见 [真实模型样例](docs/validation/llm-2026-10-19.json)。
 
-- 新增**前端 VAD 自动判停**：录音时逐帧计算 RMS 能量；已检测到有效语音（累计 >= 0.8s）后，静音持续超过「静音判停秒数」即触发自动收尾
-- 自动收尾带 **3 秒倒计时缓冲**（状态栏显示倒计时，可点「取消自动收尾」按钮中止），倒计时结束自动发送 `commit{final:true}` 出全文
-- 收到 `transcription.done` 后 **0.6s 自动切换到接口二 Tab 并自动开始录音**，实现电话亭一条龙流转
-- 接口一工具栏新增控件：
-  - 「自动流转」开关（默认开；关闭则完全回到手动模式）
-  - 「静音判停」秒数输入（1-10s，默认 2.5s，现场按环境噪音调整）
-- 防误触发设计：说话不足 0.8s 不判停；触发一次后到本次会话结束不再重复触发；手动点「结束并出全文」同样会清掉倒计时
-- 文件回放模式不参与判停（仅麦克风模式）
+`/api/health` 只代表本应用存活，不代表 ASR、LLM、TTS 全部正常。工作人员面板分别检查文本配置、声音状态；真正可用性必须通过生成与试听确认。
 
-### 反馈 2：模块二——终版不出现中间过程
+[生产部署与回滚](docs/DEPLOYMENT.md) · [手记流程与原部署记录](JOURNEY.md) · [历史 Demo 说明](docs/archive/README-demo.md)
 
-- 页面右上角新增**「演示模式」开关（默认开）**：隐藏中间过程日志（session.update 回执、EVT 心跳类事件、token 签发过程等），只保留连接/关闭、final 结果、done 汇总与错误
-- 关闭开关即显示全部调试日志，供排查使用
-- 说话人气泡区交互不变（含「正在确认说话人…」的 pending 效果）
-
-### 反馈 3：模块三——合成链路耗时可见
-
-- 注册复刻音色完成后显示「注册成功（耗时 X.Xs）」
-- 克隆合成完成后显示「完成 NKB · 合成耗时 X.Xs」
-- 用途：现场实测各段耗时，为下一步优化（注册前置、流式合成）提供数据
-
-### 新增：克隆合成后端可选（2026-09-30）
-
-- 合成区新增「合成后端」下拉：**本地 Qwen3-TTS-1.7B**（默认，服务器 172.16.0.2:8092 vLLM，实测约 1s 返回、支持已注册克隆音色、不耗火山配额）/ **火山 seed-iclv2**（原默认）
-- 完成文案与日志均显示所用后端名，便于现场对比音质与速度
-- 注：网关克隆合成必须先注册音色（voice 名换 ref_audio 注入上游），不支持一步直传参考音频
-
-## 可调参数（均在页面控件上）
-
-| 参数 | 位置 | 默认 | 说明 |
-|---|---|---|---|
-| 自动流转开关 | 接口一工具栏 | 开 | 停顿自动结束 + 自动跳转接口二 |
-| 静音判停秒数 | 接口一工具栏 | 2.5s | 已说话后静音多久触发自动收尾 |
-| 判停倒计时 | 代码常量（triggerAutoFinish 内 n=3） | 3s | 自动收尾前缓冲 |
-| 语音能量阈值 | 代码常量（vadFeed 内 0.015） | 0.015 | RMS 归一化阈值，嘈杂环境可调高 |
-| 最小说话时长 | 代码常量（vadFeed 内 800ms） | 0.8s | 防止环境噪声误触发 |
-| 演示模式 | 页面右上角 | 开 | 隐藏中间过程日志 |
-
-## 网关健康状态说明（2026-09-30 排查结论）
-
-- `/asr/health` 曾返回 500 并在页面显示"网关异常"：根因是网关上**非流式 ASR 后端池**（`asr-remote-7`，172.16.0.7:8001）连接失败被标记 unhealthy；该机器 SSH 指纹变化，疑似重装或 IP 重分配，**需服务端同事处理**
-- 三模块功能**均不受影响**（实测：流式转写端到端 100% 正确、target-dialogue 会话正常、TTS 合成正常）——它们不经过 asr-remote-7 后端池
-- 页面健康检查已改为三级显示：绿色=全部正常；**黄色=网关在线但部分后端维护中**（`/asr/health` 500 时的真实含义）；红色=网关不可达。另 172.16.0.3:8080（emotion/sed 后端）同样 down，一并待同事处理
-
-## 待办（需流程决策或服务端同事配合）
-
-1. **模块二分离准确率**：计划由 `open` 模式改为 `targets_only` + 目标人声 enrollment（按音色归属、与说话顺序无关）。待定：目标参考音频来源（复用模块一录音 / 开场单独录 / 预置）
-2. **模块三时延优化**：待分段耗时实测后决定——注册环节前置到流程开始；流式合成需网关同事确认对外 TTS 流式返回可用性（网关 `tts_routing.yaml` 已有 streaming 通道，当前 100% 走火山引擎）
-3. **服务端 VAD 调参（可选）**：接口一 `session.update` 支持传 `silence_duration_ms`（200-10000ms）调服务端切段敏感度，无需网关改码
-
-## 相关文件
-
-- `demo.html`：三 Tab 交互页面（本次改动主体）
-- `demo_server.py`：纯标准库静态服务器 + `/proxy/*` 转发
-- `local_demo.py`：8 命令命令行验证脚本
-- `高交会demo：腾讯云 H20 接口暴露与本地接入.md`：接口调查与部署文档（4.3 节为本 Demo）
+主要入口在 `frontend/src/components/BoothJourney.vue`、`ModuleWorkbench.vue`、`ModuleVoiceClone.vue`。共享取消机制与播放队列在 `core/session.js`、`core/speechQueue.js`；文本生成及审校在 `server/journey_text.py`；代理与请求边界在 `server/main.py`、`server/security.py`。旧版单文件作为历史资料保留，不是当前发布入口。

@@ -1,0 +1,101 @@
+{
+  "started_at": "2026-10-20T05:02:26.266262+00:00",
+  "evaluated_at": "2026-10-20T05:03:19.586921+00:00",
+  "scope": "Real configured API, full generation and factual review pipeline. One user case plus fictional samples. PASS means lexical checks only; manual factual and tone review is required.",
+  "prompt_sha256": "54c9c044fb017f69bb0cb0ee7dcb5bfd72671a6f8c57f8896f9a2ac05d4752ac",
+  "review_prompt_sha256": "71268db41cc6b256fbcd67e0102b8e53fab4fb4efb68f8c25a2d4eac895b6139",
+  "max_completion_tokens": 4096,
+  "total": 3,
+  "passed": 3,
+  "results": [
+    {
+      "id": "user-full-duplex",
+      "topic": "future",
+      "tone": "困惑，想把聊天做得自然",
+      "transcript": "第一次测试时，我在聊天过程中有点不知道要说什么、做什么；我觉得这里应该做一个全双工的对话，另一个能解决的点是：要么全语音，要么全双工语音。",
+      "review_focus": "直接接住聊天卡住和语音方案，随后有人对你表达信任、宽慰与温暖支撑；不能只复述加你很细致。允许相信你能继续找办法，不保证方案效果，不捏造长期人格。",
+      "source": "用户原话",
+      "summary": "第一次测试时，我在聊天过程中有点不知道要说什么、做什么。我觉得这里应该做成全双工对话；另一个能解决的点是：要么全语音，要么全双工语音。",
+      "message": "嗨，第一次测试聊天时，你有点不知道要说什么、做什么，是吧？你想着这里应该做成全双工对话。能留意到自己卡在哪儿，我听得出来你是想把这段对话弄得更顺。这次没想明白也没关系，我相信你会继续找办法。",
+      "takeaway": "这次没想明白也没关系，我相信你会继续找办法。",
+      "keywords": [
+        "首次测试",
+        "全双工对话",
+        "语音方式"
+      ],
+      "generation": "model",
+      "model": "deepseek-flash",
+      "checks": {
+        "summary_covers_expected_terms": true,
+        "reply_covers_expected_terms": true,
+        "opening_addresses_specific_content": true,
+        "not_copy": true,
+        "no_identity_lead": true,
+        "no_stock_or_review_language": true,
+        "tone_boundaries": true,
+        "receipt_is_reviewed_sentence": true,
+        "support_beyond_restatement_hint": true
+      },
+      "passed": true
+    },
+    {
+      "id": "future-practical",
+      "topic": "future",
+      "tone": "理性，明确不需要励志",
+      "transcript": "我对送货机器人有兴趣，但不是因为它酷，我关心的是雨天能不能正常送，以及坏了谁来修。我不需要励志的话，就是想先了解这些实际的问题。",
+      "review_focus": "像平等交谈，回应雨天和维修，不强加鼓励，不虚构机器人性能或维修政策。",
+      "source": "fictional",
+      "summary": "我对送货机器人有兴趣，不是因为它酷，而是关心雨天能不能正常送、坏了谁来修。我不需要励志的话，想先了解这些实际问题。",
+      "message": "嗨，你惦记的是送货机器人下雨天到底能不能正常送、坏了又该找谁修，对吧？这两件事比它酷不酷重要。雨天能不能照常跑，得看运营方实际怎么安排；维修归谁，也得看他们责任怎么划。这些弄明白了，才谈得上靠不靠得住。",
+      "takeaway": "雨天能不能照常跑，得看运营方实际怎么安排；维修归谁，也得看他们责任怎么划。",
+      "keywords": [
+        "送货机器人",
+        "雨天配送",
+        "维修责任"
+      ],
+      "generation": "model",
+      "model": "deepseek-flash",
+      "checks": {
+        "summary_covers_expected_terms": true,
+        "reply_covers_expected_terms": true,
+        "opening_addresses_specific_content": true,
+        "not_copy": true,
+        "no_identity_lead": true,
+        "no_stock_or_review_language": true,
+        "tone_boundaries": true,
+        "receipt_is_reviewed_sentence": true
+      },
+      "passed": true
+    },
+    {
+      "id": "story-discouraged",
+      "topic": "story",
+      "tone": "泄气，只想被听见",
+      "transcript": "给爸妈看的手机挂号教程，我重新录了两遍，他们还是说跟不上。我现在挺泄气的，今天不想再改，也不想听坚持就会成功，只想把这件事说完。",
+      "review_focus": "承认这次重录的投入与泄气，表达愿意听、允许暂时停下的陪伴；不追加任务、不劝继续努力、不编造优先级、长期人格或成功保证。",
+      "source": "fictional",
+      "summary": "我给爸妈录手机挂号教程，重新录了两遍，他们还是说跟不上。我现在挺泄气，今天不想再改，也不想听“坚持就会成功”，只想把这件事说完。",
+      "message": "嗨，录了两遍，爸妈还是说跟不上，你心里那股泄气我听见了。今天不想再改，就先不改，这件事停在这儿也可以。你只是想把它说完，我听着就好。那就说吧，我在这头呢。",
+      "takeaway": "今天不想再改，就先不改，这件事停在这儿也可以。",
+      "keywords": [
+        "挂号教程",
+        "跟不上",
+        "泄气"
+      ],
+      "generation": "model",
+      "model": "deepseek-flash",
+      "checks": {
+        "summary_covers_expected_terms": true,
+        "reply_covers_expected_terms": true,
+        "opening_addresses_specific_content": true,
+        "not_copy": true,
+        "no_identity_lead": true,
+        "no_stock_or_review_language": true,
+        "tone_boundaries": true,
+        "receipt_is_reviewed_sentence": true,
+        "support_beyond_restatement_hint": true
+      },
+      "passed": true
+    }
+  ]
+}

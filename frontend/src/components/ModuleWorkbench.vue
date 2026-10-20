@@ -12,9 +12,17 @@
    浅色配色与模块一（未来手记旅程）一致（全局 styles.css 的 CSS 变量体系）。
    Gateway 留空 = 经本地服务 /proxy 同源转发（server/main.py）；填写 = 直连该网关。 */
 import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
-import { WS_HOST } from '../core/api.js'
+import { WS_HOST, boundedFetch } from '../core/api.js'
 import { store, setApiKey, log, dlog } from '../core/store.js'
 import { SR, Mic, wavEncode, fileToPCM } from '../core/audio.js'
+import { Session, useActivity, openSocket, closeSocket, drainSocket, cancelled } from '../core/session.js'
+
+const props = defineProps({ active: { type: Boolean, default: true } })
+const session = new Session(), enrollment = new Session()
+const connecting = ref(false)
+let enrollmentMic = null
+useActivity(props, suspend)
+watch(() => store.apiKey, suspend)
 
 const MAX_PROFILES = 4            // 目标声纹上限（同原页）
 const MIN_ENROLL = 5              // 注册片段最小秒数（不足不保存/服务端补零同款规则）
@@ -26,6 +34,7 @@ const ROLE_COLORS = ['#d97706', '#0e9488', '#7c3aed', '#e11d48', '#4d7c0f', '#25
 
 /* ---------- 连接面板（同原页 auth-panel） ---------- */
 const gateway = ref(localStorage.getItem('amphion_gateway') || '')
+watch(gateway, suspend)
 const remember = ref(localStorage.getItem('amphion_remember') !== '0')
 const keyInput = ref(store.apiKey)
 const connText = ref('未连接')
@@ -53,7 +62,7 @@ function clearConnection() {
 async function jfetch(path, opts = {}) {
   let r
   try {
-    r = await fetch(httpBase() + path, { ...opts, headers: { 'X-API-Key': keyInput.value.trim(), ...(opts.headers || {}) } })
+    r = await boundedFetch(httpBase() + path, { ...opts, headers: { 'X-API-Key': keyInput.value.trim(), ...(opts.headers || {}) } })
   } catch (e) {
     throw Object.assign(new Error('无法连接 Gateway：' + e.message), { status: 0 })
   }
@@ -108,13 +117,16 @@ const enrollBtnTxt = ref('开始录制')
 let enrollResolve = null, enrollTickTimer = null, enrollAutoTimer = null, enrollStartedAt = 0
 
 async function recordClip() {
-  if (enrolling.value) { enrollResolve && enrollResolve('manual'); return }
-  const mic = new Mic()
+  if (enrolling.value) { cancelEnrollment('manual'); return }
+  if (!props.active) return
+  const signal = enrollment.begin()
+  const mic = enrollmentMic = new Mic()
   const chunks = []
   enrolling.value = true; enrollBtnTxt.value = '正在打开麦克风…'
   enrollStatus.value = `可随时手动停止；不足 ${MIN_ENROLL} 秒不会保存，${MAX_ENROLL} 秒自动停止。`
   try {
-    await mic.start(() => {}, f => chunks.push(f))       // collect 模式：仅收集不出帧
+    await mic.start(() => {}, chunks)
+    if (!enrollment.current(signal)) return
     enrollStartedAt = performance.now()
     const tick = () => {
       const s = (performance.now() - enrollStartedAt) / 1000
@@ -126,6 +138,7 @@ async function recordClip() {
       enrollTickTimer = setInterval(tick, 200)
       enrollAutoTimer = setTimeout(() => resolve('auto'), MAX_ENROLL * 1000)
     })
+    if (reason === 'cancelled' || !enrollment.current(signal)) return
     if (reason === 'manual') {
       const s = (performance.now() - enrollStartedAt) / 1000
       if (s < MIN_ENROLL) {
@@ -137,22 +150,33 @@ async function recordClip() {
     const joined = new Int16Array(len)
     let off = 0; for (const c of chunks) { joined.set(c, off); off += c.length }
     let bounded = joined.subarray(0, SR * MAX_ENROLL)          // 超长截到 10s
-    if (bounded.length < SR * MIN_ENROLL) {                    // 过短补零到 5s（服务端最小样本）
-      const padded = new Int16Array(SR * MIN_ENROLL)
-      padded.set(bounded); bounded = padded
-    }
+    if (bounded.length < SR * MIN_ENROLL) throw new Error('实际录音不足五秒，请检查麦克风后重录。')
     appendClip(bounded, `麦克风录音 ${clips.value.length + 1}`)
     enrollStatus.value = reason === 'auto'
       ? `已录满 ${MAX_ENROLL} 秒并自动停止，可点击播放检查。`
       : '已手动停止并添加录音，可点击播放检查。'
   } catch (e) {
+    if (!enrollment.current(signal)) return
     enrollStatus.value = e.message
     showAlert('ERROR', '添加录音失败', e.message, '可改用「添加音频」上传本地音频文件注册。')
   } finally {
     mic.stop()
+    if (enrollmentMic === mic) enrollmentMic = null
     clearInterval(enrollTickTimer); clearTimeout(enrollAutoTimer); enrollResolve = null
     enrolling.value = false; enrollBtnTxt.value = '开始录制'
   }
+}
+
+function cancelEnrollment(reason = 'cancelled') {
+  enrollmentMic?.stop()
+  if (reason === 'cancelled' || !enrollResolve) enrollment.cancel()
+  enrollResolve?.(reason)
+}
+
+function suspend() {
+  cancelEnrollment()
+  stopClipPlay()
+  teardown(false)
 }
 
 function appendClip(pcm, label) { clips.value.push({ id: 'clip-' + (++idSeq), label, pcm }) }
@@ -163,7 +187,13 @@ async function onEnrollFiles(e) {
   e.target.value = ''
   try {
     if (!consent.value) throw new Error('请先确认已取得本人授权')
-    for (const f of files) appendClip(await fileToPCM(f), f.name)
+    for (const f of files) {
+      if (f.size > 10 * 1024 * 1024) throw new Error('每个音频文件需小于 10 MB')
+      const pcm = await fileToPCM(f)
+      if (pcm.length < SR * MIN_ENROLL || pcm.length > SR * MAX_ENROLL) throw new Error('每段参考音频需为 5–10 秒')
+      if (!props.active) return
+      appendClip(pcm, f.name)
+    }
     enrollStatus.value = '音频片段已添加，可继续添加或创建档案。'
   } catch (err) {
     enrollStatus.value = err.message
@@ -214,6 +244,7 @@ function concatClips() {
   return joined
 }
 async function createProfile() {
+  if (creating.value || !props.active) return
   try {
     if (!keyInput.value.trim()) throw new Error('请先填写 API Key')
     const name = profileName.value.trim()
@@ -397,6 +428,10 @@ const showLock = computed(() => running.value && filterMode === 'open')
 const lockDisabled = computed(() => participantNames.size === 0 || ambientEnrollments.size > 0)
 
 async function startSession() {
+  if (!props.active || connecting.value || running.value) return
+  teardown(false)
+  const signal = session.begin()
+  connecting.value = true
   try {
     dismissAlert()
     if (enrolling.value) throw new Error('请先手动停止或等待声纹录音自动结束')
@@ -428,27 +463,30 @@ async function startSession() {
     let token = null
     try {
       token = await jfetch('/auth/v1/ephemeral-tokens', {
+        signal,
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ resource: 'asr.target_dialogue', expires_in_seconds: 60, max_session_seconds: SESSION_MAX }),
       })
     } catch (e) { dlog('工作台：token 签发失败（' + e.message + '），退回 ?api_key= 直连', 'evt') }
+    if (!session.current(signal)) return
 
     connText.value = ambientMode ? '正在建立匿名角色分离…' : `正在建立 ${participants.length} 路声纹分支…`
     connKind.value = 'idle'
     const sock = new WebSocket(`${wsBase()}/asr/v1/target-dialogue${token ? '' : '?api_key=' + encodeURIComponent(keyInput.value.trim())}`)
     sock.binaryType = 'arraybuffer'
     ws = sock
-    await new Promise((resolve, reject) => {
-      sock.onopen = resolve
-      sock.onerror = () => reject(new Error('WebSocket 连接失败（网关不可达或 Key 无效）'))
-    })
-    sock.onmessage = ev => { try { handleEvent(ev) } catch (e) { showAlert('ERROR', '处理事件失败', e.message, '可继续对话；若持续出现请结束本轮重开。') } }
+    await openSocket(sock, signal)
+    if (!session.current(signal)) return
+    sock.onmessage = ev => { if (!session.current(signal)) return; try { handleEvent(ev) } catch (e) { showAlert('ERROR', '处理事件失败', e.message, '可继续对话；若持续出现请结束本轮重开。') } }
     const sessionReady = new Promise((resolve, reject) => {
       const to = setTimeout(() => reject(new Error('多路声纹识别链路准备超时')), 30000)
-      sessionReadyResolve = () => { clearTimeout(to); resolve() }
-      sessionReadyReject = err => { clearTimeout(to); reject(err) }
+      const abort = () => { clearTimeout(to); reject(cancelled()) }
+      signal.addEventListener('abort', abort, { once: true })
+      sessionReadyResolve = () => { clearTimeout(to); signal.removeEventListener('abort', abort); resolve() }
+      sessionReadyReject = err => { clearTimeout(to); signal.removeEventListener('abort', abort); reject(err) }
     })
     sock.onclose = ev => {
+      if (!session.current(signal)) return
       sessionReadyReject && sessionReadyReject(new Error('WebSocket 在链路就绪前关闭'))
       if (running.value) {
         if (ev.code === 4002) showAlert('BILLING', '余额不足，连接被关闭（4002）', 'WS 建立时有余额预检。', '请到 portal.amphion.top 充值或更换 API Key。')
@@ -468,13 +506,14 @@ async function startSession() {
       },
     }))
     try { await sessionReady } catch (e) { try { sock.close() } catch (err) { /* 忽略 */ } throw e }
+    if (!session.current(signal)) return
 
     /* 麦克风：16k Int16 帧 → RMS 电平 + 二进制/JSON base64 发送 */
     running.value = true; startedAt = Date.now()
     meterW.value = 0
-    mic = new Mic()
-    await mic.start(frame => {
-      if (!running.value || sock.readyState !== 1) return
+    const capture = mic = new Mic()
+    await capture.start(frame => {
+      if (!session.current(signal) || !running.value || sock.readyState !== 1) return
       sentFrames++
       let sum = 0
       for (let i = 0; i < frame.length; i += 16) sum += frame[i] * frame[i]
@@ -482,6 +521,7 @@ async function startSession() {
       /* 网关 target-dialogue 支持二进制 PCM 帧（同原页/旧实现，已实测两条路均通，统一走二进制） */
       sock.send(new Uint8Array(frame.buffer, frame.byteOffset, frame.byteLength))
     })
+    if (!session.current(signal)) { capture.stop(); return }
     micWatchTimer = setTimeout(() => {           // 3 秒零帧：输入被系统静音 / 自动播放策略暂停了采集
       if (running.value && sentFrames === 0 && !micWarned) {
         micWarned = true
@@ -491,6 +531,7 @@ async function startSession() {
     }, 3000)
     clockTimer = setInterval(() => {
       const s = Math.floor((Date.now() - startedAt) / 1000)
+      if (s >= SESSION_MAX) { stopSession(); return }
       clock.value = `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
       /* targets_only 长时间无输出：最常见原因是说话人不是注册声纹本人（服务端按设计过滤旁人语句） */
       if (!matchWarned && filterMode === 'targets_only' && sentFrames > 150 && !turns.value.length) {
@@ -504,12 +545,13 @@ async function startSession() {
     connText.value = '会话进行中'; connKind.value = 'ready'
     log(`工作台：识别会话开始（${ambientMode ? 'open 匿名分离' : 'targets_only ' + participants.length + ' 人'}${hotwords.custom.length || hotwords.builtin.length ? ' · 热词已启用' : ''}）`, 'ok')
   } catch (e) {
+    if (!session.current(signal)) return
     showAlert('ERROR', '启动识别失败', e.message,
       '常见原因：未选目标声纹、API Key 无效、余额不足（4002）或网关维护中。')
     if (mic) { mic.stop(); mic = null }
     if (ws) { try { ws.close() } catch (err) { /* 忽略 */ }; ws = null }
     running.value = false
-  }
+  } finally { if (session.current(signal)) connecting.value = false }
 }
 
 /* ---------- WS 事件分发（协议同原页 target-dialogue） ---------- */
@@ -585,6 +627,7 @@ function handleEvent(ev) {
   } else if (t === 'session.done') {
     const s = d.duration_seconds
     doneInfo.value = `会话完成 · 时长 ${typeof s === 'number' ? s.toFixed(1) : s}s · 识别角色 ${d.identified_roles} · 压制 ${d.suppressed_roles}`
+    if (running.value) teardown(false)
   } else if (t === 'participant.reconnecting') {
     connText.value = '识别服务短暂波动 · 正在自动恢复'
   } else if (t === 'error') {
@@ -610,10 +653,11 @@ async function appendTurn(d) {
     const key = d.segment_id ? 's:' + d.segment_id : 'p:' + d.participant_id
     let row = turns.value.find(x => x.partial && x.key === key)
     if (!row) {
-      row = { key, pid: d.participant_id, partial: true, provisional: d.provisional === true, name, color, text: '', time: nowStr() }
+      row = { key, pid: d.participant_id, partial: true, provisional: d.provisional === true, name, color, text: d.text || '', time: nowStr() }
       turns.value.unshift(row)
     } else { row.text = d.text || ''; row.name = name; row.color = color }
   } else {
+    if (d.segment_id != null && turns.value.some(x => !x.partial && x.key === 'f:' + d.segment_id && x.pid === d.participant_id)) return
     turns.value = turns.value.filter(x => !(x.partial && (x.key === 's:' + d.segment_id || x.pid === d.participant_id)))
     turns.value.unshift({ key: 'f:' + (d.segment_id || Date.now()), pid: d.participant_id, partial: false, provisional: false, name, color, text: d.text || '', time: nowStr() })
   }
@@ -670,7 +714,8 @@ function lockTargets() {
 /* 停止：发 commit 触发尾段 flush；open 会话结束后回落 targets_only（同原页） */
 async function stopSession() { await teardown(true) }
 async function teardown(commit) {
-  if (!running.value && !mic && !ws) return
+  const signal = session.controller.signal, socket = ws
+  connecting.value = false
   running.value = false
   clearInterval(clockTimer); clockTimer = null
   clearTimeout(micWatchTimer); micWatchTimer = null
@@ -682,10 +727,7 @@ async function teardown(commit) {
     ambientEnrollments.clear()
     autoSelect.value = autoSelectPref
   }
-  if (ws && ws.readyState === 1) {
-    if (commit && sentFrames > 0) ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' }))
-    else ws.close()                     // 零音频帧不发 commit 直接关闭，避免服务端 "No audio data received."
-  }
+  if (!commit || !sentFrames) { session.cancel(); closeSocket(socket); if (ws === socket) ws = null }
   if (commit && sentFrames === 0)
     showAlert('MIC', '本轮未采集到任何音频', '会话期间没有发出一帧音频，服务端不会返回转写。',
       '请检查麦克风权限与系统输入音量（浏览器地址栏左侧图标），或换 Chrome 重试。')
@@ -694,8 +736,15 @@ async function teardown(commit) {
   connText.value = commit ? '正在收尾…' : '已停止'
   updateIdleHint()
   if (commit) log('工作台：识别会话已结束（发送 ' + sentFrames + ' 帧）', 'evt')
+  if (commit && sentFrames > 0) {
+    const complete = await drainSocket(socket)
+    if (!session.current(signal)) return
+    session.cancel(); if (ws === socket) ws = null
+    connText.value = '已停止'
+    hint.value = complete ? '本轮转写已完成' : '识别收尾未完成，已收到的文字已保留，请核对最后一句。'
+  }
 }
-function toggleMic() { running.value ? stopSession() : startSession() }
+function toggleMic() { (running.value || connecting.value) ? teardown(!connecting.value) : startSession() }
 
 onBeforeUnmount(() => {
   if (enrollResolve) enrollResolve('manual')          // 结束可能还在进行的注册录音
@@ -805,7 +854,7 @@ onBeforeUnmount(() => {
           <div class="session-dock">
             <div class="meter"><i :style="{ width: meterW + '%' }"></i></div>
             <p class="session-hint">{{ hint }}</p>
-            <button class="mic" :class="{ live: running }" type="button" aria-label="开始或停止识别" @click="toggleMic()">
+            <button class="mic" :class="{ live: running || connecting }" type="button" :aria-label="connecting ? '取消连接' : running ? '停止识别' : '开始识别'" :title="connecting ? '取消连接' : running ? '停止识别' : '开始识别'" @click="toggleMic()">
               <span class="mic-rings" aria-hidden="true"></span>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
                 <path d="M12 15a4 4 0 0 0 4-4V5a4 4 0 1 0-8 0v6a4 4 0 0 0 4 4Zm7-4a7 7 0 0 1-14 0M12 18v4m-4 0h8" /></svg>
@@ -825,7 +874,7 @@ onBeforeUnmount(() => {
           </div>
           <div>
             <label for="wb-key">API Key</label>
-            <input id="wb-key" class="secret-input" v-model="keyInput" placeholder="sk-..." autocomplete="off" spellcheck="false" @change="onKeyChange">
+            <input id="wb-key" type="password" class="secret-input" v-model="keyInput" placeholder="sk-..." autocomplete="off" spellcheck="false" @change="onKeyChange">
           </div>
           <div class="local-credential-row">
             <label class="remember-connection"><input type="checkbox" v-model="remember"><span>本机记住连接</span></label>

@@ -1,19 +1,25 @@
 <script setup>
-/* 模块三：声音克隆对话 —— 「你的声音，替我说话」
-   流程：说话人1 录 2–15s 参考音频 → POST /tts/v1/audio/voices 克隆音色（火山 Seed-ICL 2.0，配额 10）
-        → 说话人2 点麦克风 → WSS /asr/v1/target-dialogue（open 匿名分离模式）实时转写
-        → 每条 transcription.final 自动 POST /tts/v1/audio/speech 用克隆音色合成并顺序播放
-        （合成后端：qwen-tts-1.7b 本地 vLLM ~1s / seed-iclv2 火山）
-   接口经本地 /proxy 同源转发（server/main.py）；WS 浏览器直连 wss://amphion.top。
-   布局同模块二改造后：文档流整页滚动 + 会话卡停靠。 */
+/* Reference registration and ordered playback use the configured gateway. */
 import { ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
-import { WS_HOST } from '../core/api.js'
+import { WS_HOST, boundedFetch } from '../core/api.js'
 import { store, setApiKey, log, dlog } from '../core/store.js'
 import { SR, Mic, wavEncode, fileToPCM } from '../core/audio.js'
+import { Session, useActivity, openSocket, closeSocket, drainSocket, cancelled } from '../core/session.js'
+import { JourneySound } from '../core/journeyAudio.js'
+import { SpeechQueue, speechChunks } from '../core/speechQueue.js'
+
+const props = defineProps({ active: { type: Boolean, default: true } })
+const session = new Session(), reference = new Session(), requests = new Session()
+const connecting = ref(false)
+let sound = null
+const speech = new SpeechQueue(() => sound?.stop())
+useActivity(props, suspend)
+watch(() => store.apiKey, suspend)
+function output() { sound ||= new JourneySound(); sound.unlock(); return sound }
 
 const SESSION_MAX = 1800                 // 会话时长上限（秒，同工作台）
 const TTS_MAX_CHARS = 120                // 单次合成文本上限（防超长 TTS）
-const DEFAULT_VOICE = 'gjh_speaker1'     // demo 固定音色名（配额 10，可复用覆盖）
+const DEFAULT_VOICE = 'gjh_speaker1'
 
 /* ---------- 顶栏 Key 同步 ---------- */
 const keyInput = ref(store.apiKey)
@@ -32,7 +38,7 @@ const voices = ref([])
 const voiceSel = ref('')
 const voicesNote = ref('')
 const ttsModel = ref('')                   // ''=省略 model → 网关默认后端（cn-test 迁移期短名均 404）
-const probeText = ref('大家好，这是我的 cloned 声音。')
+const probeText = ref('给今天的自己留一句话，慢慢来，也可以继续向前。')
 const probeSt = ref('')
 
 let recMic = null, recTimer = null, recStart = 0, refBlob = null
@@ -40,7 +46,7 @@ let recMic = null, recTimer = null, recStart = 0, refBlob = null
 async function jfetch(path, opts = {}) {
   let r
   try {
-    r = await fetch('/proxy' + path, { ...opts, headers: { 'X-API-Key': keyInput.value.trim(), ...(opts.headers || {}) } })
+    r = await boundedFetch('/proxy' + path, { ...opts, headers: { 'X-API-Key': keyInput.value.trim(), ...(opts.headers || {}) } }, 120000)
   } catch (e) { throw Object.assign(new Error('无法连接网关：' + e.message), { status: 0 }) }
   if (!r.ok) {
     let detail = 'HTTP ' + r.status
@@ -52,7 +58,7 @@ async function jfetch(path, opts = {}) {
 
 /* blob 版（/tts/v1/audio/speech 返回整段 WAV，非 JSON） */
 async function jfetchBlob(path, opts = {}) {
-  const r = await fetch('/proxy' + path, { ...opts, headers: { 'X-API-Key': keyInput.value.trim(), ...(opts.headers || {}) } })
+  const r = await boundedFetch('/proxy' + path, { ...opts, headers: { 'X-API-Key': keyInput.value.trim(), ...(opts.headers || {}) } }, 240000)
   if (!r.ok) {
     let detail = 'HTTP ' + r.status
     try { const b = await r.json(); detail = b.detail || b.message || detail } catch (e) { /* 非 JSON */ }
@@ -66,26 +72,42 @@ async function toggleRec() {
     clearInterval(recTimer); recMic.stop(); recMic = null
     const dur = chunks.value.reduce((s, c) => s + c.length, 0) / SR
     recBtnTxt.value = '录制参考音频'; recTimerTxt.value = ''
-    if (dur < 2) { recInfo.value = `太短（${dur.toFixed(1)}s < 2s），请重录`; refBlob = null; return }
-    refBlob = wavEncode(chunks.value)
+    reference.cancel()
+    if (dur < 5 || dur > 16) { recInfo.value = '请录制 5–15 秒清晰的单人讲话'; refBlob = null; return }
+    let remaining = SR * 15
+    const sample = []
+    for (const chunk of chunks.value) {
+      if (remaining <= 0) break
+      sample.push(chunk.subarray(0, remaining)); remaining -= chunk.length
+    }
+    refBlob = wavEncode(sample)
     recInfo.value = `已录 ${dur.toFixed(1)}s · ${(refBlob.size / 1024).toFixed(0)}KB WAV · 可注册`
     log(`克隆：参考音频就绪（${dur.toFixed(1)}s）`, 'ok')
     return
   }
+  if (!props.active) return
+  const signal = reference.begin()
   chunks.value = []; refBlob = null
-  recMic = new Mic()
-  try { await recMic.start(() => {}, chunks.value) }
-  catch (e) { recMic = null; recInfo.value = '麦克风失败：' + e.message; return }
+  const capture = recMic = new Mic()
+  try { await capture.start(() => {}, chunks.value) }
+  catch (e) { if (reference.current(signal)) { recMic = null; recInfo.value = '麦克风失败：' + e.message } return }
+  if (!reference.current(signal)) { capture.stop(); return }
   recBtnTxt.value = '停止录制'; recStart = Date.now()
   recTimer = setInterval(() => {
     const s = (Date.now() - recStart) / 1000
-    recTimerTxt.value = s.toFixed(1) + 's' + (s > 15 ? '（已超 15s，请停止）' : '')
+    recTimerTxt.value = s.toFixed(1) + 's'
+    if (s >= 15) toggleRec()
   }, 100)
 }
 
 async function onRefFile(f) {
+  if (!props.active || recMic) return
+  const signal = reference.begin()
   try {
+    if (f.size > 10 * 1024 * 1024) throw new Error('文件需小于 10 MB')
     const pcm = await fileToPCM(f)
+    if (!reference.current(signal)) return
+    if (pcm.length / SR < 5 || pcm.length / SR > 15) throw new Error('参考音频需为 5–15 秒')
     refBlob = wavEncode([pcm]); chunks.value = [pcm]
     recInfo.value = `文件 ${f.name} · ${(pcm.length / SR).toFixed(1)}s · ${(refBlob.size / 1024).toFixed(0)}KB`
     log(`克隆：参考文件已解码（${(pcm.length / SR).toFixed(1)}s）`, 'ok')
@@ -95,6 +117,8 @@ function pickRefFile() { refFileInput.value && refFileInput.value.click() }
 function onRefFileInput(e) { const f = e.target.files[0]; if (f) onRefFile(f); e.target.value = '' }
 
 async function cloneVoice() {
+  if (!props.active || cloneBusy.value) return
+  const signal = requests.begin()
   const name = voiceName.value.trim()
   if (!refBlob) return log('克隆：请先录制或选择参考音频', 'err')
   if (!/^[A-Za-z0-9_\-]{1,64}$/.test(name)) return log('克隆：音色名需为英文/数字/下划线', 'err')
@@ -104,24 +128,26 @@ async function cloneVoice() {
     const fd = new FormData()
     fd.append('voice_name', name)
     fd.append('audio_file', refBlob, name + '.wav')
-    const r = await jfetch('/tts/v1/audio/voices', { method: 'POST', body: fd })
+    await jfetch('/tts/v1/audio/voices', { method: 'POST', body: fd, signal })
+    if (!requests.current(signal)) return
     const dt = ((performance.now() - t0) / 1000).toFixed(1)
-    cloneResult.value = `注册成功（${dt}s）：` + JSON.stringify(r).slice(0, 300)
+    cloneResult.value = `音色注册成功（${dt}s）`
     log(`克隆：音色「${name}」注册成功（${dt}s）`, 'ok')
     await listVoices(name)
   } catch (e) {
+    if (!requests.current(signal)) return
     cloneResult.value = '失败：' + e.message + (e.status === 409 ? '（同名已存在或配额满，可先删除）' : '')
     log('克隆：注册失败 ' + e.message, 'err')
-  }
-  cloneBusy.value = false
+  } finally { if (requests.current(signal)) cloneBusy.value = false }
 }
 
 async function listVoices(prefer) {
   try {
     const r = await jfetch('/tts/v1/audio/voices')
-    const list = r.voices || r.items || (Array.isArray(r) ? r : [])
+    const list = (r.voices || r.uploaded_voices || r.items || (Array.isArray(r) ? r : []))
+      .map(v => typeof v === 'string' ? v : v.voice_name || v.name || v.id).filter(Boolean)
     voices.value = list
-    voicesNote.value = `共 ${list.length} 个音色（配额 10）`
+    voicesNote.value = `共 ${list.length} 个音色`
     if (prefer && list.includes(prefer)) voiceSel.value = prefer
     else if (!voiceSel.value || !list.includes(voiceSel.value)) voiceSel.value = list[0] || ''
   } catch (e) {
@@ -141,35 +167,37 @@ async function delVoice() {
 
 /* 试听：验证克隆音色可用（不进队列，直接播） */
 async function probeSpeak() {
+  if (!props.active || running.value || connecting.value) return
   if (!voiceSel.value) return log('克隆：请先选择音色', 'err')
+  output(); speech.reset()
   const text = probeText.value.trim() || '测试'
   probeSt.value = '合成中…'
   const t0 = performance.now()
   try {
-    const blob = await synthesize(voiceSel.value, text)
-    probeSt.value = `完成 ${(blob.size / 1024).toFixed(0)}KB · ${((performance.now() - t0) / 1000).toFixed(1)}s`
-    await playBlob(blob)
+    await speech.add(async signal => {
+      for (const part of speechChunks(text)) {
+        const blob = await synthesize(voiceSel.value, part, signal)
+        if (signal.aborted) return
+        if (!await playBlob(blob)) return
+      }
+      if (!signal.aborted) probeSt.value = `试听完成 · ${((performance.now() - t0) / 1000).toFixed(1)}s`
+    })
   } catch (e) { probeSt.value = '失败：' + e.message; log('克隆：试听失败 ' + e.message, 'err') }
 }
 
-function synthesize(voice, text) {
-  const payload = { voice, input: text.slice(0, TTS_MAX_CHARS),
+function synthesize(voice, text, signal) {
+  const payload = { voice, input: text,
     response_format: 'wav', sample_rate: 24000 }
-  if (ttsModel.value) payload.model = ttsModel.value   // 空 = 网关默认后端（已验证可用）
+  if (ttsModel.value) payload.model = ttsModel.value
   return jfetchBlob('/tts/v1/audio/speech', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(payload), signal,
   })
 }
-let playNode = null
-function playBlob(blob) {
-  return new Promise((resolve) => {
-    const a = new Audio(URL.createObjectURL(blob))
-    playNode = a
-    a.onended = () => { if (playNode === a) playNode = null; resolve() }
-    a.onerror = () => { if (playNode === a) playNode = null; resolve() }
-    a.play().catch(() => resolve())
-  })
+async function playBlob(blob) {
+  const url = URL.createObjectURL(blob)
+  try { return await output().play(url) }
+  finally { URL.revokeObjectURL(url) }
 }
 
 /* ---------- 右卡：实时变声会话 ---------- */
@@ -186,15 +214,20 @@ const listEl = ref(null)
 let ws = null, mic = null, startedAt = 0, clockTimer = null, micWatchTimer = null
 let sentFrames = 0, micWarned = false, sessionReadyResolve = null, sessionReadyReject = null
 let stopping = false
-let ttsChain = Promise.resolve()           // final→合成→播放 串行队列
+const finalSegments = new Set()
 
 function nowStr() { const d = new Date(); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}` }
 
 async function startSession() {
+  if (!props.active || connecting.value || running.value) return
+  teardown(false)
+  const signal = session.begin()
+  connecting.value = true
+  output(); speech.reset()
   try {
     if (!keyInput.value.trim()) throw new Error('请先在顶栏填写 API Key')
     if (!voiceSel.value) throw new Error('请先在左卡注册/选择克隆音色')
-    turns.value = []; doneInfo.value = ''; meterW.value = 0
+    clearTurns(); finalSegments.clear(); doneInfo.value = ''; meterW.value = 0
     sentFrames = 0; micWarned = false; stopping = false
     connText.value = '正在建立识别链路…'; connKind.value = 'connecting'
 
@@ -202,25 +235,28 @@ async function startSession() {
     let token = null
     try {
       token = await jfetch('/auth/v1/ephemeral-tokens', {
+        signal,
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ resource: 'asr.target_dialogue', expires_in_seconds: 60, max_session_seconds: SESSION_MAX }),
       })
     } catch (e) { dlog('克隆会话：token 签发失败（' + e.message + '），退回 ?api_key=', 'evt') }
+    if (!session.current(signal)) return
 
     const sock = new WebSocket(`${WS_HOST}/asr/v1/target-dialogue${token ? '' : '?api_key=' + encodeURIComponent(keyInput.value.trim())}`)
     sock.binaryType = 'arraybuffer'
     ws = sock
-    await new Promise((resolve, reject) => {
-      sock.onopen = resolve
-      sock.onerror = () => reject(new Error('WebSocket 连接失败（网关不可达或 Key 无效）'))
-    })
-    sock.onmessage = ev => { try { handleEvent(ev) } catch (e) { hint.value = '事件处理异常：' + e.message } }
+    await openSocket(sock, signal)
+    if (!session.current(signal)) return
+    sock.onmessage = ev => { if (!session.current(signal)) return; try { handleEvent(ev) } catch (e) { hint.value = '事件处理异常：' + e.message } }
     const sessionReady = new Promise((resolve, reject) => {
       const to = setTimeout(() => reject(new Error('识别链路准备超时')), 30000)
-      sessionReadyResolve = () => { clearTimeout(to); resolve() }
-      sessionReadyReject = err => { clearTimeout(to); reject(err) }
+      const abort = () => { clearTimeout(to); reject(cancelled()) }
+      signal.addEventListener('abort', abort, { once: true })
+      sessionReadyResolve = () => { clearTimeout(to); signal.removeEventListener('abort', abort); resolve() }
+      sessionReadyReject = err => { clearTimeout(to); signal.removeEventListener('abort', abort); reject(err) }
     })
     sock.onclose = ev => {
+      if (!session.current(signal)) return
       sessionReadyReject && sessionReadyReject(new Error('WebSocket 在链路就绪前关闭'))
       if (running.value) {
         hint.value = ev.code === 4002 ? '余额不足（4002），连接被关闭' : `连接关闭（code ${ev.code}）`
@@ -238,17 +274,19 @@ async function startSession() {
       },
     }))
     try { await sessionReady } catch (e) { try { sock.close() } catch (err) { /* 忽略 */ } throw e }
+    if (!session.current(signal)) return
 
     running.value = true; startedAt = Date.now()
-    mic = new Mic()
-    await mic.start(frame => {
-      if (!running.value || sock.readyState !== 1) return
+    const capture = mic = new Mic()
+    await capture.start(frame => {
+      if (!session.current(signal) || !running.value || sock.readyState !== 1) return
       sentFrames++
       let sum = 0
       for (let i = 0; i < frame.length; i += 16) sum += frame[i] * frame[i]
       meterW.value = Math.min(100, Math.sqrt(sum / Math.ceil(frame.length / 16)) / 32768 * 260)
       sock.send(new Uint8Array(frame.buffer, frame.byteOffset, frame.byteLength))
     })
+    if (!session.current(signal)) { capture.stop(); return }
     micWatchTimer = setTimeout(() => {
       if (running.value && sentFrames === 0 && !micWarned) {
         micWarned = true
@@ -257,18 +295,20 @@ async function startSession() {
     }, 3000)
     clockTimer = setInterval(() => {
       const s = Math.floor((Date.now() - startedAt) / 1000)
+      if (s >= SESSION_MAX) { stopSession(); return }
       clock.value = `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
     }, 250)
     hint.value = `聆听中 · 说出的每句话将以「${voiceSel.value}」的音色复述`
     connText.value = '会话进行中'; connKind.value = 'ready'
     log(`克隆会话：开始（音色 ${voiceSel.value}）`, 'ok')
   } catch (e) {
+    if (!session.current(signal)) return
     hint.value = '启动失败：' + e.message
     connText.value = '启动失败'; connKind.value = 'idle'
     if (mic) { mic.stop(); mic = null }
     if (ws) { try { ws.close() } catch (err) { /* 忽略 */ }; ws = null }
     running.value = false
-  }
+  } finally { if (session.current(signal)) connecting.value = false }
 }
 
 /* ---------- WS 事件 ---------- */
@@ -283,6 +323,7 @@ function handleEvent(ev) {
     appendTurn(d)
   } else if (t === 'session.done') {
     doneInfo.value = `会话完成 · 时长 ${typeof d.duration_seconds === 'number' ? d.duration_seconds.toFixed(1) : d.duration_seconds}s`
+    if (running.value) teardown(false)
   } else if (t === 'participant.reconnecting') {
     connText.value = '识别服务短暂波动 · 正在自动恢复'
   } else if (t === 'error') {
@@ -298,16 +339,20 @@ async function appendTurn(d) {
     const key = d.segment_id ? 's:' + d.segment_id : 'p:' + (d.participant_id || 0)
     let row = turns.value.find(x => x.partial && x.key === key)
     if (!row) {
-      row = { key, partial: true, name, text: '', time: nowStr(), speak: '' }
+      row = { key, partial: true, name, text: d.text || '', time: nowStr(), speak: '' }
       turns.value.unshift(row)
     } else { row.text = d.text || ''; row.name = name }
   } else {
+    const id = d.segment_id != null ? `${d.participant_id || d.role_index || ''}:${d.segment_id}` : null
+    if (id && finalSegments.has(id)) return
+    if (id) finalSegments.add(id)
     turns.value = turns.value.filter(x => !(x.partial && (x.key === 's:' + d.segment_id || x.key === 'p:' + (d.participant_id || 0))))
     const row = { key: 'f:' + (d.segment_id || Date.now()), partial: false, name,
       text: d.text || '', time: nowStr(), speak: 'pending', voice: voiceSel.value, model: ttsModel.value,
-      audioUrl: '', latency: 0, sizeKB: 0 }
+      audio: [], latency: 0, sizeKB: 0 }
     turns.value.unshift(row)
-    if (row.text.trim()) enqueueTTS(row)       // final → 克隆音色合成播放
+    if (row.text.trim() && !stopping) enqueueTTS(turns.value[0])
+    else row.speak = 'skip'
   }
   await nextTick()
   if (listEl.value) listEl.value.scrollTo({ top: 0, behavior: d.type === 'transcription.partial' ? 'auto' : 'smooth' })
@@ -315,30 +360,52 @@ async function appendTurn(d) {
 
 /* ---------- TTS 串行队列：final 依次「合成→播放」，互不重叠 ---------- */
 function enqueueTTS(turn) {
-  ttsChain = ttsChain.then(() => runTTS(turn)).catch(() => {})
+  return speech.add(signal => runTTS(turn, signal)).catch(e => { turn.speak = 'error'; turn.errMsg = e.message })
 }
-async function runTTS(turn) {
-  if (stopping && turn.speak === 'pending') { turn.speak = 'skip'; return }
+async function runTTS(turn, signal) {
+  if (signal.aborted) { turn.speak = 'skip'; return }
   turn.speak = 'synth'
+  turn.audio = []; turn.sizeKB = 0
   const t0 = performance.now()
   try {
-    const blob = await synthesize(turn.voice, turn.text)
-    turn.latency = +((performance.now() - t0) / 1000).toFixed(1)
-    turn.sizeKB = +(blob.size / 1024).toFixed(0)
-    turn.audioUrl = URL.createObjectURL(blob)
-    turn.speak = 'playing'
-    await playBlob(blob)
-    turn.speak = 'done'
+    for (const part of speechChunks(turn.text, TTS_MAX_CHARS)) {
+      const blob = await synthesize(turn.voice, part, signal)
+      if (signal.aborted) return
+      turn.audio.push(blob)
+      turn.latency = +((performance.now() - t0) / 1000).toFixed(1)
+      turn.sizeKB += +(blob.size / 1024).toFixed(0)
+      turn.speak = 'playing'
+      if (!await playBlob(blob)) { turn.speak = 'skip'; return }
+    }
+    if (!signal.aborted) { turn.speak = 'done'; pruneAudio() }
   } catch (e) {
+    if (signal.aborted) { turn.speak = 'skip'; return }
     turn.speak = 'error'
     turn.errMsg = e.message
     log(`克隆会话：合成失败（${e.message}）`, 'err')
   }
 }
 async function replay(turn) {
-  if (!turn.audioUrl) return
-  const a = new Audio(turn.audioUrl); playNode = a; a.play().catch(() => {})
+  if (!props.active || running.value || connecting.value) return
+  output(); speech.reset()
+  if (turn.speak === 'done' && turn.audio?.length) {
+    try {
+      await speech.add(async signal => {
+        for (const blob of turn.audio) {
+          if (signal.aborted || !await playBlob(blob)) return
+        }
+      })
+    } catch (error) { turn.errMsg = error.message; turn.speak = 'error' }
+  } else { turn.speak = 'pending'; await enqueueTTS(turn) }
 }
+function pruneAudio() {
+  let bytes = 0
+  for (const row of turns.value) {
+    bytes += (row.audio || []).reduce((sum, blob) => sum + blob.size, 0)
+    if (bytes > 20 * 1024 * 1024) row.audio = []
+  }
+}
+function clearTurns() { turns.value = [] }
 function speakLabel(s) {
   return { pending: '排队中…', synth: '合成中…', playing: '🔊 复述中…', done: '已复述', error: '合成失败', skip: '已跳过' }[s] || ''
 }
@@ -346,25 +413,39 @@ function speakLabel(s) {
 /* ---------- 停止 ---------- */
 async function stopSession() { await teardown(true) }
 async function teardown(commit) {
-  if (!running.value && !mic && !ws) return
+  const signal = session.controller.signal, socket = ws
+  connecting.value = false
   running.value = false; stopping = true
+  speech.cancel()
+  for (const turn of turns.value) if (['pending', 'synth', 'playing'].includes(turn.speak)) turn.speak = 'skip'
   clearInterval(clockTimer); clockTimer = null
   clearTimeout(micWatchTimer); micWatchTimer = null
   if (mic) { mic.stop(); mic = null }
-  if (playNode) { try { playNode.pause() } catch (e) { /* 忽略 */ }; playNode = null }
-  if (ws && ws.readyState === 1) {
-    if (commit && sentFrames > 0) ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' }))
-    else ws.close()
-  }
+  if (!commit || !sentFrames) { session.cancel(); closeSocket(socket); if (ws === socket) ws = null }
   meterW.value = 0
   hint.value = commit ? '正在完成最后片段…' : '会话已停止'
   connText.value = commit ? '正在收尾…' : '已停止'; connKind.value = 'idle'
   if (commit) log(`克隆会话：已结束（发送 ${sentFrames} 帧）`, 'evt')
+  if (commit && sentFrames > 0) {
+    const complete = await drainSocket(socket)
+    if (!session.current(signal)) return
+    session.cancel(); if (ws === socket) ws = null
+    connText.value = '已停止'
+    hint.value = complete ? '本轮转写已完成，播放已停止' : '识别收尾未完成，请核对最后一句。'
+  }
 }
-function toggleMic() { running.value ? stopSession() : startSession() }
+function toggleMic() { (running.value || connecting.value) ? teardown(!connecting.value) : startSession() }
+function suspend() {
+  reference.cancel(); requests.cancel(); cloneBusy.value = false
+  recMic?.stop(); recMic = null; clearInterval(recTimer)
+  recBtnTxt.value = '录制参考音频'; recTimerTxt.value = ''
+  teardown(false)
+}
 
-onMounted(() => { listVoices() })
+onMounted(() => { if (props.active && store.apiKey) listVoices() })
+watch(() => props.active, active => { if (active && store.apiKey) listVoices() })
 onBeforeUnmount(() => {
+  sound?.dispose(); clearTurns()
   stopping = true
   if (recTimer) clearInterval(recTimer)
   if (recMic) recMic.stop()
@@ -385,7 +466,7 @@ onBeforeUnmount(() => {
       <!-- 左卡：克隆注册 -->
       <div class="vc-card vc-left">
         <h2>① 说话人1 · 克隆我的声音</h2>
-        <div class="vc-note">录制 2–15 秒参考音频注册音色（火山 Seed-ICL 2.0，配额 10）。同名重复注册会失败，可先删除旧音色。</div>
+        <div class="vc-note">参考录音：5–15 秒清晰的单人讲话。请仅使用本人或已获授权的声音。</div>
         <div class="vc-row">
           <button class="vc-btn" :class="{ rec: !!recTimerTxt }" @click="toggleRec()">{{ recBtnTxt }}</button>
           <span class="vc-timer">{{ recTimerTxt }}</span>
@@ -411,7 +492,7 @@ onBeforeUnmount(() => {
         </div>
         <div class="vc-row">
           <span class="vc-meta">合成后端</span>
-          <span class="vc-meta dim">网关默认 · Qwen3-TTS（0.6B vLLM，实测约 2s/句）</span>
+          <span class="vc-meta dim">由当前语音服务提供</span>
         </div>
         <div class="vc-row">
           <input class="vc-input wide" v-model="probeText" placeholder="试听文本…">
@@ -431,7 +512,7 @@ onBeforeUnmount(() => {
         </div>
         <div class="vc-row ctrl">
           <button class="vc-mic" :class="{ on: running }" @click="toggleMic()">
-            {{ running ? '■ 停止会话' : '🎤 开始对话' }}
+            {{ connecting ? '取消连接' : running ? '■ 停止会话' : '🎤 开始对话' }}
           </button>
           <div class="vc-meter"><div class="bar" :style="{ width: meterW + '%' }"></div></div>
         </div>
@@ -447,7 +528,7 @@ onBeforeUnmount(() => {
             <div v-if="!row.partial && row.speak" class="t-speak" :class="row.speak">
               <span>{{ speakLabel(row.speak) }}</span>
               <span v-if="row.speak === 'done'" class="t-dim">{{ row.sizeKB }}KB · 合成 {{ row.latency }}s</span>
-              <span v-if="row.speak === 'done'" class="t-replay" @click="replay(row)">▶ 重播</span>
+              <button v-if="['done', 'error', 'skip'].includes(row.speak)" type="button" class="t-replay" :disabled="running || connecting" @click="replay(row)">{{ row.speak === 'done' && row.audio?.length ? '重播' : '重新合成并播放' }}</button>
               <span v-if="row.speak === 'error'" class="t-dim">{{ row.errMsg }}</span>
             </div>
           </div>

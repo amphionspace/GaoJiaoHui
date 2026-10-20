@@ -1,529 +1,310 @@
 <script setup>
-/* 「未来手记」电话亭旅程 —— 8 屏状态机（对应设计稿 01–08，逻辑/文案完整，视觉从简）
-   01 idle 获得问题 | 02 listening 自由讲述 | 03 pause 暂时停顿(不自动结束,说话自动回02)
-   04 summarizing 完成讲述·整理手记 | 05 journal 生成手记 | 06 editing 语音修改(循环)
-   07 confirm 确认打印 | 08 printing/done 打印完成·取走手记
-   关键规则：只有「我说完了」(按钮或语音) 才结束讲述；静音只切安抚屏。 */
-import { ref, computed, onBeforeUnmount } from 'vue'
-import { WS_HOST, WS_HOST_LEGACY } from '../core/api.js'
-import { store, log } from '../core/store.js'
-import { SR, FRAME, Mic, b64frame } from '../core/audio.js'
-import { buildJournal, applyEdit } from '../core/journal.js'
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import { store } from '../core/store.js'
+import { endingIntent, createJourneyJournal, composeJourneyJournal } from '../core/journey.js'
+import { JourneyRecorder, JourneySound, JourneyVoice, cleanJourneyVoices, voiceFailureMessage } from '../core/journeyAudio.js'
+import JourneyIcon from './JourneyIcon.vue'
+import JourneyReceipt from './JourneyReceipt.vue'
+import JourneyEmblem from './JourneyEmblem.vue'
+import JourneyCollage from './JourneyCollage.vue'
+import './journey.css'
+import './journey-editorial.css'
 
-/* 三个问题连讲：每问独立走「讲述→修改→打印」；08 取走后倒计时自动进下一问 */
-const QUESTIONS = [
-  { label: '最惊喜的产品', hint: '今天最让你惊喜的产品或技术是什么？' },
-  { label: '一个新想法', hint: '如果让你加一个新想法，你会加什么？' },
-  { label: '今天的小故事', hint: '今天遇到的一件小事，说给未来听' },
-]
-const IDLE_Q = ['今天在高交会，', '有什么让你觉得', '“未来已经来了”？']
+const props = defineProps({ active: { type: Boolean, default: true } })
+const emit = defineEmits(['settings'])
+const stage = ref('welcome'), topicId = ref('future'), text = ref(''), journal = ref(null)
+const recording = ref(false), connecting = ref(false), level = ref(0), paused = ref(false), audioCaptured = ref(false)
+const error = ref(''), notice = ref(''), voiceIssue = ref('')
+const transcriptWarning = ref('')
+const autoFinishSeconds = ref(0)
+const voiceEnabled = ref(true), voiceState = ref('waiting'), audioUrl = ref('')
+const playing = ref(false), audioPaused = ref(false), textMode = ref(false)
+const printReturned = ref(false), busyLabel = ref('正在整理你的讲述')
+const onHome = computed(() => stage.value === 'welcome')
+const introPlaying = ref(false)
+let recorder = null, sound = null, voice = null, candidate = null, textRequest = null
+let session = 0, audioTask = 0, turn = 0, finishing = false, introRun = 0
+let doneTimer, maxTimer
+let lastVoiceError = ''
 
-const screen = ref('idle')            // idle|listening|pause|nextq|summarizing|journal|editing|confirm|printing|done
-const qIndex = ref(0)                 // 当前第几问（0..2）
-const answers = ref(['', '', ''])     // 三问各自的讲述全文（讲完一问自动存入）
-const nextQCountdown = ref(0)         // 「下一问」过渡屏倒计时
-const transcript = ref('')            // 讲述实时记录（全量累积）
-const finalText = ref('')             // 讲述最终全文
-const journal = ref(null)
-const changes = ref([])               // 06 屏变更标注 [{where,label}]
-const editUtterance = ref('')         // 修改轮实时指令
-const editApplied = ref(null)         // 最近一次应用结果文案
-const editMode = ref('voice')         // voice|text
-const editTextInput = ref('')
-const printMsg = ref('')
-const pauseSec = ref(3)               // 静音多久切「暂时停顿」安抚屏（不结束）
-const micLevel = ref(0)               // 实时麦克风音量 0-1（驱动「我在听」音量条，现场排障一眼可见）
-let silenceWarnT = null, silenceWarned = false
-
-/* 底部三段旅程状态推导 */
-const stages = computed(() => {
-  const s = screen.value
-  const tell = ['idle', 'listening', 'pause', 'nextq', 'summarizing'].includes(s)
-  const tellDone = !tell
-  const edit = ['journal', 'editing'].includes(s)
-  const print = ['confirm', 'printing', 'done'].includes(s)
-  return [
-    { name: '讲述', state: tellDone ? 'checked' : 'active' },
-    { name: '修改', state: tell ? 'inactive' : edit ? 'active' : 'checked' },
-    { name: '打印', state: print ? (s === 'done' ? 'checked' : 'active') : 'inactive' },
-  ]
+function unlockAudio() { sound?.unlock() }
+function clearTimers() { for (const timer of [doneTimer, maxTimer]) clearTimeout(timer) }
+function stopRecording() {
+  turn++; clearTimers(); recorder?.stop(); recorder = null
+  recording.value = connecting.value = false; level.value = 0; audioCaptured.value = false
+  autoFinishSeconds.value = 0
+}
+function stopPlayback() {
+  audioTask++; sound?.stop(); playing.value = audioPaused.value = false
+}
+function releaseAudio() { if (audioUrl.value) URL.revokeObjectURL(audioUrl.value); audioUrl.value = '' }
+function cancelSession() {
+  introRun++; introPlaying.value = false
+  session++; stopRecording(); stopPlayback(); releaseAudio()
+  textRequest?.abort(); textRequest = null
+  voice?.dispose(); voice = null; candidate = null; finishing = false; lastVoiceError = ''
+}
+function reset() {
+  cancelSession(); stage.value = 'welcome'; topicId.value = 'future'; text.value = ''; journal.value = null
+  error.value = notice.value = voiceIssue.value = ''
+  transcriptWarning.value = ''
+  voiceState.value = 'waiting'; paused.value = textMode.value = printReturned.value = false
+}
+async function beginJourney() {
+  if (!props.active || recording.value || connecting.value || textMode.value || introPlaying.value) return
+  stopPlayback(); unlockAudio(); error.value = ''; notice.value = ''
+  const id = session, run = ++introRun
+  stage.value = 'intro'; introPlaying.value = true
+  try {
+    const ended = await sound.play('/journey/call-intro.wav?v=2')
+    if (id !== session || run !== introRun || !props.active) return
+    introPlaying.value = false
+    if (ended) await startListening()
+  } catch {
+    if (id !== session || run !== introRun) return
+    introPlaying.value = false
+    error.value = '接通引导暂时没有播放成功。可以重新听，或直接开始讲述。'
+  }
+}
+async function startListening() {
+  if (!props.active || stage.value !== 'intro') return
+  introRun++; introPlaying.value = false; stopPlayback()
+  stage.value = 'listening'; error.value = ''
+  await listen()
+}
+async function listen() {
+  stopRecording()
+  if (stage.value !== 'listening') return
+  if (!props.active || textMode.value || !store.apiKey.trim()) {
+    if (!store.apiKey.trim()) error.value = '语音服务还未连接，请打开设置填写网关密钥，或先用文字体验。'
+    return
+  }
+  const id = session, myTurn = turn, prefix = text.value.trim()
+  connecting.value = true; paused.value = false
+  transcriptWarning.value = ''
+  const current = new JourneyRecorder(store.apiKey, {
+    onText(value) {
+      if (id !== session || myTurn !== turn) return
+      text.value = [prefix, value].filter(Boolean).join('\n')
+      clearTimeout(doneTimer)
+      if (endingIntent(value)) doneTimer = setTimeout(() => { if (id === session && !finishing) finishStory() }, 650)
+    },
+    onLevel(value, speaking) {
+      if (id !== session || myTurn !== turn) return
+      level.value = value
+      if (speaking) { paused.value = false; autoFinishSeconds.value = 0 }
+    },
+    onActivity(silence, heardSpeech) {
+      if (id !== session || myTurn !== turn || finishing) return
+      paused.value = heardSpeech && silence >= 3.5
+      autoFinishSeconds.value = heardSpeech && text.value.trim() && silence >= 5 ? Math.max(0, Math.ceil(8 - silence)) : 0
+      if (heardSpeech && silence >= 8 && text.value.trim()) finishStory()
+    },
+    onAudio() { if (id === session && myTurn === turn) audioCaptured.value = true },
+    onError(message) { if (id === session && myTurn === turn) { error.value = message; stopRecording() } },
+    onWarning(message) { if (id === session) transcriptWarning.value = message },
+    ...(voiceEnabled.value ? { onSample(blob) { if (id === session) prepareVoice(blob) } } : {}),
+  })
+  recorder = current
+  try {
+    await current.start()
+    if (id !== session || myTurn !== turn || !props.active) { current.stop(); return }
+    recording.value = true; connecting.value = false; error.value = ''
+    maxTimer = setTimeout(() => {
+      if (text.value.trim()) finishStory()
+      else { stopRecording(); error.value = '暂时没有听清讲述，请靠近麦克风重试，或用文字记录。' }
+    }, 180000)
+  } catch (e) { if (id === session && myTurn === turn) { stopRecording(); error.value = e.message } }
+}
+function useText() { introRun++; introPlaying.value = false; stopPlayback(); sound?.unlock?.(); stopRecording(); textMode.value = true; error.value = ''; transcriptWarning.value = ''; stage.value = 'listening' }
+function prepareVoice(blob) {
+  if (!voiceEnabled.value || (voice?.registration && voiceState.value !== 'failed')) return
+  voice?.dispose()
+  candidate = blob; lastVoiceError = ''; voiceIssue.value = ''
+  const id = session
+  const current = voice = new JourneyVoice(store.apiKey)
+  voiceState.value = 'registering'
+  return current.register(blob)
+    .then(() => { if (id === session && voice === current) voiceState.value = 'ready' })
+    .catch(e => { if (id === session && voice === current) { lastVoiceError = e.message; voiceState.value = 'failed'; voiceIssue.value = voiceFailureMessage(e) } })
+}
+async function finishStory() {
+  if (finishing || stage.value !== 'listening') return
+  sound?.unlock?.()
+  finishing = true; stage.value = 'generating'; busyLabel.value = '正在收好你的最后一句话'
+  const id = session, current = recorder
+  clearTimers()
+  try {
+    if (current) await current.finish()
+    if (id !== session) return
+    stopRecording()
+    const fullTranscript = text.value
+    const content = (endingIntent(fullTranscript)?.text ?? fullTranscript).trim()
+    if (!content) throw new Error('暂时没有识别到文字。可以重试录音，或改用文字留下这段讲述。')
+    text.value = content
+    journal.value = createJourneyJournal(fullTranscript, topicId.value)
+    finishing = false
+    await composeNote()
+  } catch (e) { if (id === session) { stopRecording(); error.value = e.message; stage.value = 'listening'; finishing = false } }
+}
+async function composeNote() {
+  if (!journal.value) return
+  stopRecording(); stopPlayback(); releaseAudio(); textRequest?.abort()
+  const controller = textRequest = new AbortController(), id = session, draft = journal.value
+  stage.value = 'generating'; error.value = notice.value = ''; busyLabel.value = '正在读懂今天的你，写一封来自未来的回信'
+  try {
+    const result = await composeJourneyJournal(draft, { signal: controller.signal, apiKey: store.apiKey })
+    if (id !== session || textRequest !== controller || journal.value?.revision !== draft.revision) return
+    journal.value = result; textRequest = null; stage.value = 'preview'
+    if (voiceEnabled.value && voice?.registration) await makeAudio(true)
+    else {
+      notice.value = voiceEnabled.value ? '回信已写好。还需要至少五秒清晰的本人录音，才能用你的声音读出来。' : '你的未来手记已经准备好。'
+    }
+  } catch (e) {
+    if (id !== session || textRequest !== controller || controller.signal.aborted) return
+    textRequest = null; stage.value = 'preview'
+    error.value = e.name === 'TimeoutError' ? '回信生成超时，完整讲述已保留，可以重新整理。' : e.message
+  }
+}
+async function makeAudio(autoplay = false, retry = false) {
+  if (!journal.value?.messageToSelf || !voiceEnabled.value) return
+  stopRecording(); stopPlayback(); releaseAudio()
+  const id = session, job = ++audioTask, revision = journal.value.revision
+  error.value = voiceIssue.value = ''; stage.value = 'generating'; busyLabel.value = '正在用你的声音，接通这封来自未来的回信'
+  try {
+    if (retry && voiceState.value === 'failed' && !voice?.ready && candidate) {
+      await voice?.dispose()
+      if (id !== session || job !== audioTask) return
+      voice = null; prepareVoice(candidate)
+    }
+    if (!voice) throw new Error(lastVoiceError || '清晰录音不足，请重新开始通话后再试。')
+    const blob = await voice.synthesize(journal.value.messageToSelf)
+    if (id !== session || job !== audioTask || journal.value?.revision !== revision) return
+    audioUrl.value = URL.createObjectURL(blob); voiceState.value = 'ready'; stage.value = 'preview'; notice.value = ''
+    if (autoplay) await replay()
+  } catch (e) {
+    if (id !== session || job !== audioTask) return
+    stage.value = 'preview'; voiceState.value = 'failed'
+    lastVoiceError = e.message
+    voiceIssue.value = voiceFailureMessage(e)
+  }
+}
+function skipAudio() { stopPlayback(); stage.value = 'preview'; notice.value = '手记已经准备好，声音可以稍后重试。' }
+async function replay() {
+  unlockAudio()
+  if (!audioUrl.value) { await makeAudio(true); return }
+  stopRecording(); stopPlayback()
+  const id = session, job = audioTask
+  stage.value = 'playback'; playing.value = true; audioPaused.value = false
+  try {
+    await sound.play(audioUrl.value)
+    if (id !== session || job !== audioTask) return
+    playing.value = false; stage.value = 'preview'
+  } catch (e) {
+    if (id !== session || job !== audioTask) return
+    playing.value = false; stage.value = 'preview'
+    error.value = e.name === 'NotAllowedError' ? '声音已经生成，浏览器需要一次点击才能开启播放。' : `声音已生成，但播放失败：${e.message || '请重试'}。`
+  }
+}
+async function togglePlayback() {
+  if (!playing.value) { await replay(); return }
+  if (!audioPaused.value) { sound.pause(); audioPaused.value = true }
+  else { try { await sound.resume(); audioPaused.value = false } catch { error.value = '播放未能继续，请重新播放。' } }
+}
+async function printJournal() {
+  if (!journal.value || stage.value === 'printing') return
+  stopPlayback(); stopRecording(); stage.value = 'printing'; printReturned.value = false
+  await nextTick(); window.print()
+}
+function afterPrint() { if (stage.value === 'printing') printReturned.value = true }
+function backToPreview() { stage.value = 'preview' }
+function complete() { cancelSession(); stage.value = 'done'; error.value = notice.value = '' }
+watch(() => props.active, active => {
+  if (!active) {
+    cancelSession()
+    if (['intro', 'generating', 'playback', 'printing'].includes(stage.value)) stage.value = journal.value ? 'preview' : 'listening'
+    if (journal.value) notice.value = '手记已保留。离开页面后录音与播放已停止。'
+  }
 })
-
-/* ---- 讲述会话（02/03 共用一条 WS） ---- */
-let ws = null, mic = null, stopFlag = false, sentFrames = 0, finishTimer = null
-let vadSpeechMs = 0, vadSilenceMs = 0, vadHas = false, finished = false
-
-function feedVad(pcm) {
-  let sum = 0; for (let i = 0; i < pcm.length; i++) sum += pcm[i] * pcm[i]
-  const rms = Math.sqrt(sum / pcm.length) / 32768, durMs = pcm.length / SR * 1000
-  micLevel.value = Math.min(1, rms * 8)               // 约rms0.015(触发阈值)→0.12，正常说话0.05-0.3→0.4-1
-  if (rms > 0.015) {
-    vadSpeechMs += durMs; vadSilenceMs = 0
-    if (!vadHas && vadSpeechMs >= 400) vadHas = true
-    if (vadHas && screen.value === 'pause') { screen.value = 'listening'; log('旅程：继续讲述') }
-  } else if (vadHas) {
-    vadSilenceMs += durMs
-    if (screen.value === 'listening' && vadSilenceMs >= pauseSec.value * 1000) {
-      screen.value = 'pause'
-      log(`旅程：静音 ${pauseSec.value}s -> 暂时停顿屏（不会自动结束）`, 'evt')
-    }
+watch(voiceEnabled, enabled => {
+  if (!enabled) {
+    stopPlayback(); voice?.dispose(); voice = null; candidate = null; releaseAudio(); voiceState.value = 'waiting'; voiceIssue.value = ''
+    if (journal.value && !textRequest && ['generating', 'playback'].includes(stage.value)) stage.value = 'preview'
   }
+})
+function pageHidden() {
+  if (!document.hidden) return
+  cancelSession()
+  if (['intro', 'generating', 'playback', 'printing'].includes(stage.value)) stage.value = journal.value ? 'preview' : 'listening'
+  if (!onHome.value) notice.value = '讲述已保留，录音与播放已暂停。'
 }
-
-function saidDone(text) {           // 语音结束语检测（去标点后尾部包含）
-  const t = String(text || '').replace(/[，。！？,.!?~\s]/g, '')
-  return /我说完了$/.test(t) || /我说完了/.test(t.slice(-12))
-}
-
-async function beginSpeak() {       // 01 -> 02：开 WS + 麦克风，一条会话贯穿 02/03
-  if (ws) return
-  transcript.value = ''; finalText.value = ''
-  stopFlag = false; sentFrames = 0; finished = false; turnDoneHandled = false
-  vadSpeechMs = 0; vadSilenceMs = 0; vadHas = false
-  micLevel.value = 0; silenceWarned = false
-  try {
-    ws = new WebSocket(`${WS_HOST_LEGACY}/asr/v1/realtime?api_key=${encodeURIComponent(store.apiKey)}`)
-    ws.onopen = () => {
-      log('旅程：讲述会话 WS 已连接', 'ok')
-      screen.value = 'listening'
-      ws.send(JSON.stringify({type: 'session.update', session: {language: 'auto'}}))
-      const sendJSON = f => { if (ws.readyState === 1) { sentFrames++
-        ws.send(JSON.stringify({type: 'input_audio_buffer.append', audio: b64frame(f)})) } }
-      mic = new Mic()
-      mic.start(pcm => { feedVad(pcm)
-        for (let i = 0; i < pcm.length; i += FRAME) sendJSON(pcm.subarray(i, i + FRAME)) })
-        .catch(e => { log('旅程：麦克风失败 - ' + e.message, 'err'); abortSpeak() })
-      // 静音自检：正在推流但 VAD 从未检测到声音 → 大概率输入设备选错/系统层静音（服务端会照常计费但识别为空）
-      clearTimeout(silenceWarnT)
-      silenceWarnT = setTimeout(() => {
-        if (ws && !vadHas && !silenceWarned) {
-          silenceWarned = true
-          log('旅程：⚠ 麦克风一直没有声音 —— 请检查系统输入设备选择、麦克风权限或音量（上方音量条应有起伏）', 'evt')
-        }
-      }, 6000)
-    }
-    ws.onmessage = ev => {
-      let d; try { d = JSON.parse(ev.data) } catch (e) { return }
-      const t = d.type || ''
-      if (t === 'transcription.delta') {
-        if (!transcript.value && (d.text || d.delta)) log('旅程：识别通道已通，开始出字', 'ok')
-        transcript.value = d.text || d.delta || ''
-        if (!finished && screen.value !== 'summarizing' && saidDone(transcript.value)) {
-          log('旅程：识别到结束语「我说完了」', 'evt')
-          finishSpeak()
-        }
-      } else if (t === 'transcription.done') {
-        finalText.value = d.text || transcript.value
-        log('旅程：讲述全文已收到（计费 ' + (d.usage && d.usage.seconds ? d.usage.seconds.toFixed(1) + 's' : '?') + '）', 'ok')
-        if (finished) turnDone()
-      } else if (t === 'error') {
-        log('旅程：服务端错误 - ' + (d.message || JSON.stringify(d).slice(0, 200)), 'err')
-      }
-    }
-    ws.onclose = () => { ws = null }
-    ws.onerror = () => log('旅程：WS 错误', 'err')
-  } catch (e) { log('旅程：' + e.message, 'err'); abortSpeak() }
-}
-
-/* 主动关闭 WS：摘掉回调再关，避免服务端随后断开被误报成「WS 错误」 */
-function closeWsQuiet(s) {
-  try { s.onerror = null; s.onclose = null; s.close() } catch (e) {}
-}
-
-function finishSpeak() {            // 「我说完了」：出全文 -> 存本问 -> 自动下一问或整理
-  if (finished) return
-  finished = true
-  if (mic) { mic.stop(); mic = null }
-  const clean = t => String(t || '').replace(/我说完了[。！？.!?\s]*$/, '').trim()
-  finalText.value = clean(transcript.value)
-  if (ws && ws.readyState === 1) {
-    if (sentFrames > 0) ws.send(JSON.stringify({type: 'input_audio_buffer.commit', final: true}))
-    else closeWsQuiet(ws)
-    finishTimer = setTimeout(turnDone, 3000)        // done 未回则兜底
-  } else turnDone()
-}
-
-/* ---- 三问连讲：一问讲完 -> 过渡屏 3s 自动开始下一问；最后一问讲完 -> 合并整理 ---- */
-let nextQT = null, turnDoneHandled = false
-
-function turnDone() {               // 本问 done/兜底归口（防重入）
-  if (turnDoneHandled) return
-  turnDoneHandled = true
-  clearTimeout(finishTimer); finishTimer = null
-  clearTimeout(silenceWarnT)
-  if (ws && ws.readyState === 1) closeWsQuiet(ws)
-  ws = null
-  answers.value[qIndex.value] = (finalText.value || transcript.value || '').trim()
-  if (answers.value[qIndex.value]) log(`旅程：第 ${qIndex.value + 1}/${QUESTIONS.length} 问讲完（${answers.value[qIndex.value].length} 字）`, 'ok')
-  else log(`旅程：第 ${qIndex.value + 1} 问没有内容，跳过`, 'evt')
-  if (qIndex.value < QUESTIONS.length - 1) {
-    screen.value = 'nextq'
-    nextQCountdown.value = 3
-    nextQT = setInterval(() => {
-      nextQCountdown.value--
-      if (nextQCountdown.value <= 0) { clearInterval(nextQT); nextQT = null; startQuestion(qIndex.value + 1) }
-    }, 1000)
-  } else summarizeAll()
-}
-
-function skipNextQ() {              // 过渡屏「现在就开始」：跳过倒计时
-  clearInterval(nextQT); nextQT = null
-  startQuestion(qIndex.value + 1)
-}
-
-function abortSpeak() {             // 异常中止：回 01
-  stopFlag = true
-  clearTimeout(silenceWarnT)
-  if (mic) { mic.stop(); mic = null }
-  if (ws && ws.readyState === 1) closeWsQuiet(ws)
-  ws = null; screen.value = 'idle'
-}
-
-function summarizeAll() {           // 三问讲完：合并整理 -> 04 -> 05
-  if (['summarizing', 'journal', 'editing', 'confirm'].includes(screen.value)) return   // 防重入
-  if (ws && ws.readyState === 1) ws.close()
-  ws = null
-  screen.value = 'summarizing'
-  const segs = answers.value.map(s => (s || '').trim()).filter(Boolean)
-  if (!segs.length) {
-    log('旅程：三个问题都没有内容，请重新开始', 'err')
-    screen.value = 'idle'; qIndex.value = 0
-    return
-  }
-  setTimeout(() => {
-    journal.value = buildJournal(segs)          // 分段输入：发现 = 每问一句
-    changes.value = []
-    log('旅程：手记已生成（合并 ' + segs.length + ' 问）- 「' + journal.value.title + '」', 'ok')
-    screen.value = 'journal'
-  }, 1400)
-}
-
-/* ---- 06 语音修改轮：短会话收指令，静音 2s 自动应用；也支持文本输入兜底 ---- */
-let ews = null, emic = null, eSent = 0, eSilence = 0, eHasVoice = false, eApplyTimer = null
-
-function resetEditLoop() {
-  if (eApplyTimer) { clearTimeout(eApplyTimer); eApplyTimer = null }
-  if (emic) { emic.stop(); emic = null }
-  if (ews && ews.readyState === 1) ews.close()
-  ews = null; eSent = 0; eSilence = 0; eHasVoice = false
-}
-
-async function startEditVoice() {   // 进入语音修改监听
-  resetEditLoop()
-  editUtterance.value = ''; editApplied.value = ''
-  try {
-    ews = new WebSocket(`${WS_HOST_LEGACY}/asr/v1/realtime?api_key=${encodeURIComponent(store.apiKey)}`)
-    ews.onopen = () => {
-      screen.value = 'editing'
-      ews.send(JSON.stringify({type: 'session.update', session: {language: 'auto'}}))
-      const sendJSON = f => { if (ews.readyState === 1) { eSent++
-        ews.send(JSON.stringify({type: 'input_audio_buffer.append', audio: b64frame(f)})) } }
-      emic = new Mic()
-      emic.start(pcm => {
-        let sum = 0; for (let i = 0; i < pcm.length; i++) sum += pcm[i] * pcm[i]
-        const rms = Math.sqrt(sum / pcm.length) / 32768
-        if (rms > 0.015) { eHasVoice = true; eSilence = 0 }
-        else if (eHasVoice) {
-          eSilence += pcm.length / SR * 1000
-          if (eSilence >= 2000 && editUtterance.value) applyEditDone(editUtterance.value)   // 静音 2s 自动应用
-        }
-        for (let i = 0; i < pcm.length; i += FRAME) sendJSON(pcm.subarray(i, i + FRAME))
-      }).catch(e => { log('旅程：修改轮麦克风失败 - ' + e.message + '，可改用文本输入', 'err'); resetEditLoop() })
-    }
-    ews.onmessage = ev => {
-      let d; try { d = JSON.parse(ev.data) } catch (e) { return }
-      if (d.type === 'transcription.delta') editUtterance.value = d.text || d.delta || ''
-      else if (d.type === 'error') log('旅程：修改轮服务端错误 - ' + (d.message || ''), 'err')
-    }
-    ews.onclose = () => { ews = null }
-    ews.onerror = () => log('旅程：修改轮 WS 错误', 'err')
-  } catch (e) { log('旅程：修改轮 - ' + e.message, 'err'); resetEditLoop() }
-}
-
-function applyEditDone(utterance) { // 解析并应用修改指令（语音/文本共用）
-  resetEditLoop()
-  const r = applyEdit(journal.value, utterance)
-  if (!r) {
-    editApplied.value = '没听懂这句修改（示例：标题改得轻松一点 / 加一句明年再来）'
-    log('旅程：修改指令未识别 - ' + utterance, 'evt')
-    return
-  }
-  journal.value = r.journal
-  changes.value = r.changes
-  editApplied.value = '已更新 ' + r.changes.length + ' 处'
-  log('旅程：修改已应用（' + r.changes.map(c => c.label).join('、') + '）', 'ok')
-}
-
-function finishEditing() {          // 06 -> 07
-  resetEditLoop()
-  changes.value = []                // 确认屏不显示编辑标记（设计稿 07）
-  screen.value = 'confirm'
-}
-
-function doPrint() {                // 07 -> 打印（模拟）-> 08（三问已全部讲完，打印即终点）
-  screen.value = 'printing'
-  printMsg.value = '正在打印…（演示：打印为模拟）'
-  log('旅程：已确认打印（演示环境模拟出纸）', 'ok')
-  setTimeout(() => {
-    printMsg.value = ''
-    screen.value = 'done'
-  }, 1200)
-}
-
-function startQuestion(i) {          // 进入第 i 问的讲述（01 卡片/主按钮/过渡屏自动跳共用）
-  clearInterval(nextQT); nextQT = null; nextQCountdown.value = 0
-  resetEditLoop(); abortSpeak()      // 清上一问会话与修改轮状态（abortSpeak 会短暂回 idle，随后即开新会话）
-  qIndex.value = Math.max(0, Math.min(i, QUESTIONS.length - 1))
-  transcript.value = ''; finalText.value = ''; journal.value = null
-  changes.value = []; editUtterance.value = ''; editApplied.value = ''; editTextInput.value = ''
-  log(`旅程：第 ${qIndex.value + 1}/${QUESTIONS.length} 问「${QUESTIONS[qIndex.value].label}」开始`)
-  beginSpeak()
-}
-
-function resetAll() {               // 08 -> 01 重新开始（清三问答案，回第一问）
-  clearInterval(nextQT); nextQT = null; nextQCountdown.value = 0
-  resetEditLoop(); abortSpeak()
-  qIndex.value = 0
-  answers.value = ['', '', '']
-  transcript.value = ''; finalText.value = ''; journal.value = null
-  changes.value = []; editUtterance.value = ''; editApplied.value = ''; editTextInput.value = ''
-  screen.value = 'idle'
-  log('旅程：已重置，从第一问重新开始')
-}
-
-onBeforeUnmount(() => { resetEditLoop(); abortSpeak(); clearTimeout(finishTimer); clearInterval(nextQT) })
+onMounted(() => {
+  sound = new JourneySound()
+  window.addEventListener('afterprint', afterPrint); window.addEventListener('pagehide', cancelSession); document.addEventListener('visibilitychange', pageHidden)
+  cleanJourneyVoices(store.apiKey)
+})
+watch(() => store.apiKey, () => {
+  cancelSession()
+  if (journal.value) { stage.value = 'preview'; notice.value = '连接设置已更新，讲述与手记已保留。' }
+  else if (!onHome.value) stage.value = 'listening'
+})
+onBeforeUnmount(() => {
+  cancelSession(); sound?.dispose()
+  window.removeEventListener('afterprint', afterPrint); window.removeEventListener('pagehide', cancelSession); document.removeEventListener('visibilitychange', pageHidden)
+})
 </script>
 
 <template>
-  <section class="card">
-    <div class="row" style="margin:0 0 10px;border-bottom:1px solid var(--line);padding-bottom:10px">
-      <h2 style="margin:0">高交会 · 未来手记</h2>
-      <span class="tag">☎ 听筒</span>
-      <span class="tag">讲述 — 修改 — 打印（8 屏旅程）</span>
-      <label class="sub" style="display:inline-flex;gap:4px;align-items:center">
-        停顿切安抚屏 <input type="number" v-model="pauseSec" min="1" max="10" step="0.5" style="width:48px">秒</label>
+  <section class="journey" :class="{ 'journey-home': onHome }" aria-label="和未来的自己对话" @pointerdown.capture="unlockAudio" @keydown.capture="unlockAudio">
+    <div class="journey-windowbar" aria-hidden="true"><span class="journey-window-dots"><i /><i /><i /></span><span>future.call / to myself</span><span class="journey-window-mark">↗</span></div>
+    <div class="journey-topline"><span>高交会 · AMPHION</span><span>A CALL TO YOUR FUTURE SELF</span></div>
+    <div v-if="!onHome" class="journey-brand"><JourneyEmblem compact /><span>未来来电</span><button class="journey-icon-button" title="结束通话" aria-label="结束通话" @click="reset"><JourneyIcon name="X" /></button></div>
+    <div v-if="error" class="journey-alert" role="alert"><span>{{ error }}</span><button v-if="!store.apiKey" class="journey-link" @click="emit('settings')">打开设置</button><button class="journey-icon-button" aria-label="关闭提示" title="关闭提示" @click="error = ''"><JourneyIcon name="X" :size="16" /></button></div>
+    <div v-if="voiceIssue && ['preview', 'playback'].includes(stage)" class="journey-alert" role="alert"><span>{{ voiceIssue }} 讲述与手记已保留。</span></div>
+    <div v-if="transcriptWarning" class="journey-alert" role="alert">{{ transcriptWarning }}</div>
+    <template v-if="onHome">
+      <div class="journey-home-content">
+        <p class="journey-eyebrow" lang="en">A call from tomorrow.</p>
+        <h1><span>和未来的</span><span>自己对话</span></h1>
+        <JourneyCollage />
+        <p class="journey-tagline">把今天的想法，讲给未来的自己听。</p>
+        <div class="journey-home-actions"><button class="journey-primary call-start" @click="beginJourney"><JourneyIcon name="Phone" />开始通话<JourneyIcon name="ArrowRight" /></button></div>
+        <label class="journey-consent"><input type="checkbox" v-model="voiceEnabled" />用我的声音，听见未来的回信</label>
+        <div class="journey-keepsake"><span>把声音留在此刻。</span><em lang="en">Keep this moment.</em></div>
+      </div>
+    </template>
+    <div v-else-if="stage === 'intro'" class="journey-intro">
+      <span class="journey-section-label"><span class="status-dot live" /> 通话已接通</span>
+      <h2>你好，今天的你。</h2>
+      <div class="journey-guide"><p>像打电话一样，<br />把想说的内容告诉我。</p><div class="journey-wave moving" :class="{ stopped: !introPlaying }" aria-hidden="true"><i v-for="i in 19" :key="i" :style="{ height: `${8 + Math.abs(Math.sin(i * 2)) * 22}px`, animationDelay: `${i * .08}s` }" /></div><p class="guide-question">今天，哪一项新科技让你印象最深？<br />你希望它为你，或你在意的人，带来什么改变？</p></div>
+      <span class="journey-small" role="status">{{ introPlaying ? '正在听接通引导' : '准备好，就把这一刻说出来' }}</span>
+      <div class="journey-actions"><button class="journey-secondary" @click="startListening"><JourneyIcon name="Mic" />我准备好了</button><button v-if="!introPlaying" class="journey-link" @click="beginJourney"><JourneyIcon name="RotateCcw" :size="16" />再听一次</button></div>
     </div>
-
-    <!-- 01 获得问题 -->
-    <div v-if="screen === 'idle'" style="text-align:center;padding:26px 10px">
-      <div class="sub" style="font-size:13px">☎ 听筒已接通</div>
-      <div style="font-size:26px;line-height:1.6;font-weight:600;margin:18px 0 6px">
-        <div v-for="(l, i) in IDLE_Q" :key="i">{{ l }}</div>
-      </div>
-      <div class="sub">想到什么，就从哪里说起 · 讲完一问，自动进入下一问</div>
-      <!-- 三问竖排卡片：点任意一问，从该问开始连讲 -->
-      <div style="display:flex;flex-direction:column;gap:10px;max-width:420px;margin:20px auto">
-        <button v-for="(q, i) in QUESTIONS" :key="q.label"
-          style="display:flex;align-items:center;gap:12px;padding:14px 16px;border:1px solid var(--line);
-            border-radius:12px;background:var(--panel2);cursor:pointer;text-align:left"
-          @click="startQuestion(i)">
-          <span style="font-size:18px;font-weight:600;color:var(--acc)">{{ i + 1 }}</span>
-          <span>
-            <span style="display:block;font-size:15px;font-weight:600">{{ q.label }}</span>
-            <span class="sub" style="display:block;font-size:12px">{{ q.hint }}</span>
-          </span>
-        </button>
-      </div>
-      <div class="sub" style="color:var(--acc)">直接对着听筒说就好 · 说「我说完了」进入下一问</div>
-      <button class="act" style="margin-top:14px" @click="startQuestion(0)">开始讲述（从第一问）</button>
+    <div v-else-if="stage === 'listening'" class="journey-listening">
+      <div class="journey-section-label"><span :class="['status-dot', { live: recording }]" />{{ textMode ? '写给未来的自己' : '此刻，专心听你说' }}</div><h2 role="status">{{ textMode ? '把这一刻，写下来' : connecting ? '正在接通麦克风' : recording ? paused ? '慢慢想，我还在' : '可以开始说话了' : '准备好，再继续' }}</h2><p class="journey-subtitle">哪一项新科技，让你对以后的生活有了新的期待？</p>
+      <div v-if="!textMode" class="journey-wave large" aria-hidden="true"><i v-for="i in 23" :key="i" :style="{ height: `${6 + level * 50 * (.3 + Math.abs(Math.sin(i)) * .7)}px` }" /></div>
+      <label v-if="textMode" class="journey-text-entry"><span>你的讲述</span><textarea v-model="text" placeholder="今天让我印象最深的是……" rows="7" /></label>
+      <div v-else class="journey-transcript" role="log" aria-label="实时讲述" aria-live="polite"><span class="journey-section-label">{{ connecting ? '正在连接' : text ? '你的完整讲述' : audioCaptured ? '已收到声音，正在识别' : recording ? '等待你的声音' : '讲述已暂停' }}</span><p>{{ text || '你的第一句话，会出现在这里。' }}</p></div>
+      <p class="journey-notice" v-if="notice">{{ notice }}</p><div class="journey-actions"><button class="journey-primary" @click="finishStory" :disabled="!text.trim() && !audioCaptured"><JourneyIcon name="Check" />我说完了</button><button v-if="!recording && !connecting && !textMode" class="journey-secondary" @click="listen"><JourneyIcon name="Mic" />继续录音</button><button class="journey-link" @click="textMode ? (textMode = false, listen()) : useText()">{{ textMode ? '改用语音' : '改用文字' }}</button></div>
+      <p class="journey-small" role="status">{{ textMode ? '写完后，把今天留在手记里。' : autoFinishSeconds ? `${autoFinishSeconds} 秒后开始整理，继续说话可接着记录。` : paused ? '还想说些什么，我在听。' : '' }}</p><button class="journey-link muted" @click="reset"><JourneyIcon name="ArrowLeft" :size="15" />结束这次通话</button>
     </div>
-
-    <!-- 02 自由讲述（含三问竖排进度清单） -->
-    <div v-else-if="screen === 'listening'">
-      <!-- 三问竖排清单：已讲完打勾、当前问高亮 -->
-      <div style="border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-bottom:12px">
-        <div v-for="(q, i) in QUESTIONS" :key="q.label"
-          :style="{display:'flex',alignItems:'center',gap:'10px',padding:'9px 14px',fontSize:'14px',
-            background: i === qIndex ? 'rgba(47,111,237,.06)' : 'transparent',
-            borderBottom: i < QUESTIONS.length - 1 ? '1px solid var(--line)' : 'none',
-            color: i < qIndex ? 'var(--dim)' : 'inherit'}">
-          <span :style="{width:'20px',height:'20px',borderRadius:'50%',flex:'0 0 20px',display:'inline-flex',
-            alignItems:'center',justifyContent:'center',fontSize:'12px',
-            border: i === qIndex ? '1px solid var(--acc)' : '1px solid var(--line)',
-            color: i < qIndex ? 'var(--ok)' : i === qIndex ? 'var(--acc)' : 'var(--dim)',
-            background: i < qIndex ? 'rgba(23,138,76,.08)' : 'transparent'}">
-            {{ i < qIndex ? '✓' : i + 1 }}</span>
-          <span :style="{textDecoration: i < qIndex ? 'line-through' : 'none',
-            fontWeight: i === qIndex ? 600 : 400}">{{ q.label }}</span>
-          <span v-if="i === qIndex" class="tag" style="margin-left:auto;color:var(--acc);border-color:var(--acc)">正在听</span>
-          <span v-else-if="i < qIndex" style="margin-left:auto;font-size:12px;color:var(--ok)">已讲完</span>
-        </div>
-      </div>
-      <div class="sub">正在聆听 · 第 {{ qIndex + 1 }}/{{ QUESTIONS.length }} 问</div>
-      <div style="font-size:30px;font-weight:600;margin:6px 0">我在听</div>
-      <div class="sub">想到什么，就慢慢说</div>
-      <!-- 真实麦克风音量条：说话时应明显起伏；始终不动=输入设备/权限有问题 -->
-      <div class="row" style="justify-content:center;gap:3px;height:26px;align-items:center">
-        <span v-for="i in 9" :key="i" :style="{display:'inline-block',width:'3px',borderRadius:'2px',
-          background:'var(--acc)',height:(4+micLevel*22*(0.45+0.55*Math.abs(Math.sin(i*1.3))))+'px'}"></span>
-      </div>
-      <div class="sub" style="font-size:11px">说话时上面的音量条应有起伏</div>
-      <div style="background:var(--panel2);border:1px dashed #c6ccd6;border-radius:10px;padding:12px;margin:10px 0">
-        <div class="sub" style="margin-bottom:4px">实时记录</div>
-        <div style="font-size:16px;line-height:1.8;white-space:pre-wrap;min-height:56px">{{ transcript || '（正在等你开口…）' }}</div>
-      </div>
-      <div class="sub">可以停顿，想好了再继续</div>
-      <div class="row" style="justify-content:center;margin-top:10px">
-        <button class="act" style="padding:12px 44px" @click="finishSpeak()">我说完了</button>
-      </div>
-      <div class="sub" style="text-align:center">
-        {{ qIndex < QUESTIONS.length - 1 ? '说「我说完了」，或点击按钮进入下一问' : '说「我说完了」，或点击按钮生成手记' }}</div>
-    </div>
-
-    <!-- 03 暂时停顿（不自动结束） -->
-    <div v-else-if="screen === 'pause'">
-      <div class="sub" style="border:1px solid var(--line);border-radius:999px;padding:3px 12px;display:inline-block">暂时停顿 · 仍在聆听</div>
-      <div style="font-size:28px;font-weight:600;line-height:1.5;margin:12px 0">慢慢想，<br>我还在</div>
-      <div class="sub">想好了，接着说就好</div>
-      <div class="row" style="justify-content:center;gap:8px;color:var(--acc)">
-        <span style="display:inline-block;width:60%;height:2px;background:var(--line)"></span>
-        <span style="width:6px;height:6px;border-radius:50%;background:var(--acc);display:inline-block"></span>
-        <span style="width:6px;height:6px;border-radius:50%;background:var(--acc);display:inline-block"></span>
-        <span style="width:6px;height:6px;border-radius:50%;background:var(--acc);display:inline-block"></span>
-        <span style="display:inline-block;width:60%;height:2px;background:var(--line)"></span>
-      </div>
-      <div style="background:var(--panel2);border:1px dashed #c6ccd6;border-radius:10px;padding:12px;margin:10px 0">
-        <div class="sub" style="margin-bottom:4px">刚刚说到</div>
-        <div style="font-size:16px;line-height:1.8">{{ (transcript || '').trim().split(/[。！？]/).filter(Boolean).slice(-1)[0] || '…' }}</div>
-      </div>
-      <div class="sub" style="color:var(--warn)">不会因为安静而自动结束</div>
-      <div class="row" style="justify-content:center;margin-top:10px">
-        <button class="act" style="padding:12px 44px" @click="finishSpeak()">我说完了</button>
-      </div>
-      <div class="sub" style="text-align:center">讲完后，再告诉我</div>
-    </div>
-
-    <!-- 03b 下一问过渡：一问讲完自动切，3 秒倒计时（可跳过） -->
-    <div v-else-if="screen === 'nextq'" style="text-align:center;padding:26px 10px">
-      <div class="sub" style="border:1px solid var(--ok);color:var(--ok);border-radius:999px;padding:3px 12px;display:inline-block">
-        ✓ 第 {{ qIndex + 1 }}/{{ QUESTIONS.length }} 问 · 已讲完</div>
-      <div style="font-size:26px;font-weight:600;margin:14px 0 8px">这一问，聊完了</div>
-      <div class="sub">接下来，我们聊聊</div>
-      <div style="font-size:20px;font-weight:600;color:var(--acc);margin:8px 0 4px">「{{ QUESTIONS[qIndex + 1].label }}」</div>
-      <div class="sub" style="color:var(--dim);margin-top:2px">{{ QUESTIONS[qIndex + 1].hint }}</div>
-      <div class="sub" style="color:var(--acc);margin-top:14px">{{ nextQCountdown }} 秒后自动开始</div>
-      <div class="row" style="justify-content:center;margin-top:10px">
-        <button class="act" style="padding:12px 36px" @click="skipNextQ()">现在就开始</button>
-      </div>
-    </div>
-
-    <!-- 04 完成讲述·整理中 -->
-    <div v-else-if="screen === 'summarizing'" style="text-align:center;padding:30px 10px">
-      <div class="sub" style="border:1px solid var(--ok);color:var(--ok);border-radius:999px;padding:3px 12px;display:inline-block">✓ 讲述已完成</div>
-      <div style="font-size:26px;font-weight:600;margin:14px 0 8px">三问都聊完了，<br>这段讲述，记下了</div>
-      <div class="sub">“我说完了”</div>
-      <div style="margin:18px 0;font-size:15px">正在整理你的手记</div>
-      <div class="row" style="justify-content:center;gap:6px">
-        <span v-for="i in 3" :key="i" style="width:8px;height:8px;border-radius:50%;background:var(--acc);display:inline-block"></span>
-      </div>
-      <div class="sub" style="margin-top:16px">把你的发现和原话，认真留下</div>
-      <div class="sub" style="margin-top:6px">生成后，你可以继续修改</div>
-    </div>
-
-    <!-- 05/06/07 手记卡（journal / editing / confirm 共用；变更标记仅 editing 显示） -->
-    <div v-else-if="['journal', 'editing', 'confirm', 'printing'].includes(screen)">
-      <div class="sub" v-if="screen === 'journal'">手记已生成</div>
-      <div class="sub" v-else-if="screen === 'editing'" style="color:var(--ok)">
-        {{ editApplied || '正在聆听你的修改…' }}</div>
-      <div class="sub" v-else-if="screen === 'confirm'">手记已就绪</div>
-      <div class="sub" v-else>打印完成</div>
-
-      <div style="font-size:24px;font-weight:600;margin:6px 0" v-if="screen === 'journal'">你的未来手记</div>
-      <div style="font-size:24px;font-weight:600;margin:6px 0" v-else-if="screen === 'editing'">按你说的，改好了</div>
-      <div style="font-size:24px;font-weight:600;margin:6px 0" v-else-if="screen === 'confirm'">最后看一眼</div>
-      <div style="font-size:24px;font-weight:600;margin:6px 0" v-else>把今天的未来，<br>带回家</div>
-
-      <!-- 06 语音指令气泡 -->
-      <div v-if="screen === 'editing'" style="border:1px solid var(--acc);border-radius:12px;padding:8px 12px;
-        background:rgba(47,111,237,.04);font-size:14px;line-height:1.7;white-space:pre-wrap">
-        <span class="sub">你想怎么改：</span>{{ editUtterance || '（说出修改指令，停 2 秒自动生效…）' }}
-      </div>
-      <div v-if="screen === 'confirm'" class="sub">确认后，才会打印</div>
-
-      <!-- 手记纸卡 -->
-      <div v-if="journal && screen !== 'printing'" style="background:#fffdf8;border:1px solid #e8e2d4;
-        border-radius:12px;padding:18px 20px;margin:12px 0;box-shadow:0 1px 4px rgba(0,0,0,.04)">
-        <div class="sub" style="text-align:center;letter-spacing:2px">{{ journal.masthead }}</div>
-        <div style="text-align:center;font-size:20px;font-weight:600;margin:10px 0 4px;
-          background:rgba(23,138,76,.08)">
-          {{ journal.title }}
-          <span v-if="screen === 'editing' && journal.titleChanged" class="tag" style="color:var(--acc);border-color:var(--acc)">标题已修改</span>
-        </div>
-        <div class="sub" style="margin-top:12px">我的发现</div>
-        <div style="font-size:15px;line-height:1.9">
-          <div v-for="(d, i) in journal.discoveries" :key="i">0{{ i + 1 }}&nbsp;&nbsp;{{ d }}</div>
-        </div>
-        <div class="sub" style="margin-top:12px">{{ journal.quoteLabel }}</div>
-        <div style="font-size:15px;line-height:1.9">“{{ journal.quote }}”</div>
-        <div v-if="journal.added" style="font-size:15px;line-height:1.9;margin-top:6px;
-          background:rgba(23,138,76,.08)">
-          {{ journal.added.text }}
-          <span v-if="screen === 'editing'" class="tag" style="color:var(--acc);border-color:var(--acc)">新增</span>
-        </div>
-        <div class="row" style="margin-top:14px">
-          <span v-for="k in journal.keywords" :key="k" class="tag">{{ k }}</span>
-        </div>
-      </div>
-
-      <!-- 各屏操作区 -->
-      <template v-if="screen === 'journal'">
-        <div class="sub">直接说，你想怎么改</div>
-        <div class="sub" style="border:1px dashed var(--acc);color:var(--acc);border-radius:999px;
-          padding:3px 12px;display:inline-block">比如：标题改得轻松一点</div>
-        <div class="row" style="margin-top:12px">
-          <button class="act" @click="startEditVoice()">我想改一改</button>
-          <button class="act ghost" @click="screen = 'confirm'">内容没问题</button>
-        </div>
-      </template>
-      <template v-else-if="screen === 'editing'">
-        <div class="sub">还想调整，可以继续说</div>
-        <div class="row" style="margin-top:10px">
-          <button class="act" @click="finishEditing()">修改完成，去确认</button>
-          <button class="mini" @click="startEditVoice()">重新说修改</button>
-        </div>
-        <div class="row">
-          <input type="text" v-model="editTextInput" placeholder="无麦克风？输入指令，如：加一句明年再来"
-            style="flex:1;min-width:220px" @keyup.enter="applyEditDone(editTextInput)">
-          <button class="mini" @click="applyEditDone(editTextInput)">应用</button>
-        </div>
-      </template>
-      <template v-else-if="screen === 'confirm'">
-        <div class="row" style="margin-top:12px">
-          <button style="background:var(--acc);border:none;color:#fff;padding:14px 0;width:100%;
-            border-radius:10px;font-size:17px;cursor:pointer" @click="doPrint()">确认并打印</button>
-        </div>
-        <div class="row" style="justify-content:center">
-          <button class="act ghost" @click="startEditVoice()">返回修改</button>
-        </div>
-      </template>
-
-      <!-- 08 打印完成（含取走指引） -->
-      <template v-if="screen === 'printing' || screen === 'done'">
-        <div v-if="printMsg" class="sub" style="text-align:center;margin-top:10px">{{ printMsg }}</div>
-        <template v-if="screen === 'done'">
-          <div class="row" style="justify-content:center;margin-bottom:8px">
-            <span class="tag" style="color:var(--ok);border-color:var(--ok)">✓ 三个问题 · 一张手记</span>
-          </div>
-          <div style="text-align:center;margin:14px 0;font-size:15px;font-weight:600">请从下方取走手记</div>
-          <div style="text-align:center;font-size:34px;color:var(--acc)">⬇</div>
-          <div class="sub" style="text-align:center;margin-top:16px">☎ 取走后，请挂好听筒</div>
-          <div class="sub" style="text-align:center;margin-top:14px;color:var(--ok)">三个问题都聊完了，谢谢你</div>
-          <div class="row" style="justify-content:center;margin-top:10px">
-            <button class="act ghost" @click="resetAll()">重新开始</button>
-          </div>
+    <div v-else-if="stage === 'generating'" class="journey-generating"><JourneyIcon class="journey-spinner" name="LoaderCircle" :size="42" /><h2>{{ busyLabel }}</h2><p>把你的发现和声音，认真留下。</p><button v-if="journal?.messageToSelf" class="journey-secondary" @click="skipAudio">先看手记<JourneyIcon name="ArrowRight" /></button><button class="journey-link muted" @click="reset">重新开始</button></div>
+    <div v-else-if="['preview', 'playback', 'printing'].includes(stage) && journal" class="journey-result">
+      <div class="journey-paper-preview"><JourneyReceipt :journal="journal" /></div>
+      <div class="journey-result-content">
+        <div class="journey-section-label">一通电话 · 一张属于你的便签</div><h2>{{ stage === 'printing' ? '把这一刻，带回家' : stage === 'playback' ? '听，是未来的你' : journal.messageToSelf ? '未来的你，有话想说' : '你的讲述已留下' }}</h2><p class="journey-subtitle">{{ stage === 'printing' ? '等一张纸，留下今天的自己。' : '这一封回信，用你的声音说给自己听。' }}</p>
+        <div v-if="stage !== 'printing'" class="journey-letter"><span>{{ journal.messageToSelf ? '未来的我，对今天的我说' : '今天的讲述' }}</span><p>{{ journal.messageToSelf || journal.sourceText }}</p><button v-if="!journal.messageToSelf" class="journey-secondary" @click="composeNote"><JourneyIcon name="RotateCcw" />重新整理与回信</button></div>
+        <details v-if="stage !== 'printing'" class="journey-original"><summary>完整讲述</summary><p>{{ journal.originalText }}</p></details>
+        <div v-if="stage !== 'printing' && journal.messageToSelf" class="journey-audio-row"><button v-if="audioUrl" class="journey-play" :aria-label="playing && !audioPaused ? '暂停播放' : '播放我的声音'" :title="playing && !audioPaused ? '暂停播放' : '播放我的声音'" @click="togglePlayback"><JourneyIcon :name="playing && !audioPaused ? 'Pause' : 'Play'" /></button><button v-else-if="voiceEnabled && voice" class="journey-secondary" @click="makeAudio(true, true)"><JourneyIcon name="Volume2" />{{ voiceState === 'failed' ? '重试我的声音' : '生成我的声音' }}</button><span v-if="audioUrl">{{ playing ? audioPaused ? '已暂停' : '正在播放 · 我的声音' : '用我的声音，听未来的回信' }}</span></div>
+        <p v-if="notice" class="journey-notice" role="status">{{ notice }}</p>
+        <template v-if="stage === 'printing'"><p class="journey-notice">{{ printReturned ? '打印窗口已关闭，请确认是否收到手记。' : '等待打印操作完成。' }}</p><div class="journey-actions"><button class="journey-primary" @click="complete"><JourneyIcon name="Check" />已收到手记</button><button class="journey-secondary" @click="backToPreview">返回预览</button></div></template>
+        <template v-else>
+          <div class="journey-actions"><button class="journey-primary" @click="printJournal"><JourneyIcon name="Printer" />打印手记</button><button class="journey-link muted" @click="reset">结束体验</button></div>
         </template>
-      </template>
+      </div>
     </div>
-
-    <!-- 底部三段旅程 -->
-    <div class="row" style="justify-content:center;gap:18px;border-top:1px solid var(--line);
-      padding-top:12px;margin-top:14px">
-      <span v-for="(s, i) in stages" :key="s.name"
-        :style="{color: s.state === 'inactive' ? 'var(--dim)' : s.state === 'active' ? 'var(--acc)' : 'var(--ok)',
-          fontWeight: s.state === 'active' ? 600 : 400, fontSize: '13px'}">
-        {{ s.state === 'checked' ? '✓ ' : '' }}{{ s.name }}{{ i < 2 ? ' —' : '' }}
-      </span>
-    </div>
+    <div v-else-if="stage === 'done'" class="journey-done"><JourneyIcon name="Sprout" :size="42" /><h2>这一刻，留住了。</h2><p>带上这份回信，慢慢走向你的未来。</p><button class="journey-primary" @click="reset(); beginJourney()"><JourneyIcon name="Phone" />开始新的通话</button></div>
+    <div class="journey-bottom"><span>始于此刻 · 寄往未来</span><span>FUTURE CALL / 2026</span></div>
+    <Teleport to="body"><div v-if="journal && active" id="journey-print-root"><JourneyReceipt :journal="journal" /></div></Teleport>
   </section>
 </template>
-

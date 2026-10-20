@@ -1,0 +1,23 @@
+[Unit]
+Description=Future Notes Qwen3-TTS voice cloning
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/journey_tts_service
+ExecStart=/home/ubuntu/journey_tts_service/.venv/bin/python -m uvicorn service:app --host 127.0.0.1 --port 18970 --no-access-log
+Environment=HF_HUB_OFFLINE=1
+Environment=TOKENIZERS_PARALLELISM=false
+Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=180
+TimeoutStopSec=180
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

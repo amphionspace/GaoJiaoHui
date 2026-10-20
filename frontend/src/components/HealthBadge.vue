@@ -1,6 +1,5 @@
 <script setup>
-/* 网关健康徽章：三级显示
-   绿 = /asr/health 200；黄 = 500（网关在线，其探测的 ASR 后端池降级，三模块不受影响）；红 = 网关不可达 */
+/* This check covers ASR only, never the independent TTS or text services. */
 import { ref } from 'vue'
 import { api } from '../core/api.js'
 import { log } from '../core/store.js'
@@ -14,13 +13,13 @@ async function checkHealth() {
   try {
     const h = await api('/asr/health')
     color.value = 'var(--ok)'
-    txt.value = '网关正常 · uptime ' + Math.round((h.uptime_seconds || 0) / 3600) + 'h'
+    txt.value = '识别服务健康检查通过'
     log('/asr/health: ' + JSON.stringify(h), 'ok')
   } catch (e) {
     if (e.status === 500) {
       color.value = 'var(--warn)'
-      txt.value = '网关在线 · 部分后端维护中（三模块功能实测可用）'
-      log('/asr/health 返回 500（其探测的 ASR 后端池降级），网关本身在线；流式转写/多人分离/克隆合成走独立链路不受影响', 'evt')
+      txt.value = '识别服务健康检查失败'
+      log('识别服务健康检查返回 500，请检查后端。声音合成需单独验证。', 'err')
     } else {
       color.value = 'var(--err)'
       txt.value = '网关异常'

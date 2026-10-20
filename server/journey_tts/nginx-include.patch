@@ -1,0 +1,8 @@
+--- www_amphion_top.conf
++++ www_amphion_top.conf
+@@ -1,4 +1,5 @@
+ server {
+     server_name www.amphion.top amphion.top;
+     include /etc/nginx/conf.d/includes/www_amphion_top_target_dialogue.conf;
++    include /etc/nginx/conf.d/includes/journey_tts.conf;
+ 
