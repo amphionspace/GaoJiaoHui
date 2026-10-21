@@ -53,23 +53,32 @@ export function explainMicError(e) {
 
 /* 麦克风：AudioContext(16k) + ScriptProcessor；onChunk(Int16Array)；collect 可选收集 */
 export class Mic {
-  constructor() { this.ctx = null; this.stream = null; this.proc = null; this.generation = 0 }
-  async start(onChunk, collect, constraints = {}) {
+  constructor({ context = null } = {}) { this.ctx = context; this.ownsContext = !context; this.stream = null; this.proc = null; this.generation = 0 }
+  async prepare(constraints = {}) {
+    if (this.stream && this.ctx?.state === 'running') return true
     const generation = ++this.generation
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)
       throw new Error('当前环境不支持麦克风采集（navigator.mediaDevices 不可用），请换 Chrome/Safari 标准窗口或用「音频文件测试」')
     try {
       const stream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: false, noiseSuppression: false, ...constraints}})
-      if (generation !== this.generation) { stream.getTracks().forEach(t => t.stop()); return }
+      if (generation !== this.generation) { stream.getTracks().forEach(t => t.stop()); return false }
       this.stream = stream
     } catch (e) { throw new Error(explainMicError(e)) }
-    try { this.ctx = new AudioContext({sampleRate: SR, latencyHint: 'interactive'}) }
-    catch (e) { this.ctx = new AudioContext() }
+    if (!this.ctx || this.ctx.state === 'closed') {
+      this.ownsContext = true
+      try { this.ctx = new AudioContext({sampleRate: SR, latencyHint: 'interactive'}) }
+      catch (e) { this.ctx = new AudioContext() }
+    }
     if (this.ctx.state === 'suspended') {   /* Safari/自动播放策略：非点击手势同步栈内创建的 ctx 为 suspended，不 resume 则 onaudioprocess 永不触发（零帧无转写） */
       try { await this.ctx.resume() } catch (e) { /* resume 失败由调用方的零帧提示兜底 */ }
     }
-    if (generation !== this.generation) return
-    const src = this.ctx.createMediaStreamSource(this.stream)
+    if (generation !== this.generation) return false
+    if (this.ctx.state === 'suspended') throw new Error('浏览器尚未开启录音，请点击继续录音重试。')
+    return true
+  }
+  async start(onChunk, collect, constraints = {}) {
+    if (!await this.prepare(constraints)) return
+    const src = this.source = this.ctx.createMediaStreamSource(this.stream)
     this.proc = this.ctx.createScriptProcessor(2048, 1, 1)
     this.proc.onaudioprocess = ev => {
       const pcm = floatTo16(resampleTo16k(ev.inputBuffer.getChannelData(0), this.ctx.sampleRate))
@@ -81,9 +90,10 @@ export class Mic {
   stop() {
     this.generation++
     try { this.proc && this.proc.disconnect(); } catch (e) {}
+    try { this.source && this.source.disconnect(); } catch (e) {}
     try { this.stream && this.stream.getTracks().forEach(t => t.stop()); } catch (e) {}
-    try { this.ctx && this.ctx.close(); } catch (e) {}
-    this.proc = this.stream = this.ctx = null
+    try { this.ownsContext && this.ctx && this.ctx.close(); } catch (e) {}
+    this.source = this.proc = this.stream = this.ctx = null
   }
 }
 

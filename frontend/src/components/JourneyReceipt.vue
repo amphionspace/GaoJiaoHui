@@ -5,7 +5,7 @@ defineProps({ journal: { type: Object, required: true } })
 <template>
   <article class="journey-receipt" aria-label="未来来电纪念便签">
     <header class="receipt-masthead">
-      <div class="receipt-kicker"><span>高交会 · AMPHION</span><span>私人珍藏版</span></div>
+      <div class="receipt-kicker"><span>高交会 · 安菲翁科技</span><span>私人珍藏版</span></div>
       <strong>未来来电</strong>
       <p lang="en">The Future Post</p>
     </header>
@@ -20,7 +20,7 @@ defineProps({ journal: { type: Object, required: true } })
       <p><span v-for="(word, index) in journal.keywords" :key="word"><i>{{ String(index + 1).padStart(2, '0') }}</i>{{ word }}</span></p>
     </div>
     <section v-if="journal.takeaway" class="receipt-reply">
-      <div class="receipt-section-label"><span>02 / 来自未来的回音</span><span lang="en">TOMORROW</span></div>
+      <div class="receipt-section-label"><span>02 / 来自未来的回音</span><span lang="en">Tomorrow</span></div>
       <blockquote><span class="receipt-quote-mark" aria-hidden="true">“</span><p>{{ journal.takeaway }}</p></blockquote>
       <p class="receipt-signature">以后的我，留给现在的我。</p>
     </section>

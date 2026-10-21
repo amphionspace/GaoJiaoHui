@@ -3,10 +3,12 @@ import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { store } from '../core/store.js'
 import { endingIntent, createJourneyJournal, composeJourneyJournal } from '../core/journey.js'
 import { JourneyRecorder, JourneySound, JourneyVoice, cleanJourneyVoices, voiceFailureMessage } from '../core/journeyAudio.js'
+import { warmSpeechDetector, releasePreparedDetector } from '../core/journeySpeech.js'
 import JourneyIcon from './JourneyIcon.vue'
 import JourneyReceipt from './JourneyReceipt.vue'
 import JourneyEmblem from './JourneyEmblem.vue'
 import JourneyCollage from './JourneyCollage.vue'
+import JourneyWind from './JourneyWind.vue'
 import './journey.css'
 import './journey-editorial.css'
 
@@ -14,6 +16,9 @@ const props = defineProps({ active: { type: Boolean, default: true } })
 const emit = defineEmits(['settings'])
 const stage = ref('welcome'), topicId = ref('future'), text = ref(''), journal = ref(null)
 const recording = ref(false), connecting = ref(false), level = ref(0), paused = ref(false), audioCaptured = ref(false)
+const connectionPhase = ref('microphone')
+const connectionLabel = computed(() => ({ microphone: '正在开启麦克风', speech: '正在准备倾听', connection: '正在接通语音服务' }[connectionPhase.value] || '正在接通'))
+const connectionHint = computed(() => ({ microphone: '如浏览器询问权限，请选择允许使用麦克风。', speech: '首次使用需要加载片刻，准备好后会提醒你开始。', connection: '麦克风已就绪，正在等待语音服务。' }[connectionPhase.value] || ''))
 const error = ref(''), notice = ref(''), voiceIssue = ref('')
 const transcriptWarning = ref('')
 const autoFinishSeconds = ref(0)
@@ -39,6 +44,7 @@ function stopPlayback() {
 }
 function releaseAudio() { if (audioUrl.value) URL.revokeObjectURL(audioUrl.value); audioUrl.value = '' }
 function cancelSession() {
+  releasePreparedDetector()
   introRun++; introPlaying.value = false
   session++; stopRecording(); stopPlayback(); releaseAudio()
   textRequest?.abort(); textRequest = null
@@ -55,6 +61,7 @@ async function beginJourney() {
   stopPlayback(); unlockAudio(); error.value = ''; notice.value = ''
   const id = session, run = ++introRun
   stage.value = 'intro'; introPlaying.value = true
+  warmSpeechDetector().catch(() => {})
   try {
     const ended = await sound.play('/journey/call-intro.wav?v=2')
     if (id !== session || run !== introRun || !props.active) return
@@ -73,6 +80,7 @@ async function startListening() {
   await listen()
 }
 async function listen() {
+  unlockAudio()
   stopRecording()
   if (stage.value !== 'listening') return
   if (!props.active || textMode.value || !store.apiKey.trim()) {
@@ -81,8 +89,10 @@ async function listen() {
   }
   const id = session, myTurn = turn, prefix = text.value.trim()
   connecting.value = true; paused.value = false
+  connectionPhase.value = 'microphone'
   transcriptWarning.value = ''
   const current = new JourneyRecorder(store.apiKey, {
+    onPhase(value) { if (id === session && myTurn === turn) connectionPhase.value = value },
     onText(value) {
       if (id !== session || myTurn !== turn) return
       text.value = [prefix, value].filter(Boolean).join('\n')
@@ -104,7 +114,7 @@ async function listen() {
     onError(message) { if (id === session && myTurn === turn) { error.value = message; stopRecording() } },
     onWarning(message) { if (id === session) transcriptWarning.value = message },
     ...(voiceEnabled.value ? { onSample(blob) { if (id === session) prepareVoice(blob) } } : {}),
-  })
+  }, { context: sound?.context })
   recorder = current
   try {
     await current.start()
@@ -116,7 +126,7 @@ async function listen() {
     }, 180000)
   } catch (e) { if (id === session && myTurn === turn) { stopRecording(); error.value = e.message } }
 }
-function useText() { introRun++; introPlaying.value = false; stopPlayback(); sound?.unlock?.(); stopRecording(); textMode.value = true; error.value = ''; transcriptWarning.value = ''; stage.value = 'listening' }
+function useText() { releasePreparedDetector(); introRun++; introPlaying.value = false; stopPlayback(); sound?.unlock?.(); stopRecording(); textMode.value = true; error.value = ''; transcriptWarning.value = ''; stage.value = 'listening' }
 function prepareVoice(blob) {
   if (!voiceEnabled.value || (voice?.registration && voiceState.value !== 'failed')) return
   voice?.dispose()
@@ -281,14 +291,14 @@ onBeforeUnmount(() => {
       <div class="journey-actions"><button class="journey-secondary" @click="startListening"><JourneyIcon name="Mic" />我准备好了</button><button v-if="!introPlaying" class="journey-link" @click="beginJourney"><JourneyIcon name="RotateCcw" :size="16" />再听一次</button></div>
     </div>
     <div v-else-if="stage === 'listening'" class="journey-listening">
-      <div class="journey-section-label"><span :class="['status-dot', { live: recording }]" />{{ textMode ? '写给未来的自己' : '此刻，专心听你说' }}</div><h2 role="status">{{ textMode ? '把这一刻，写下来' : connecting ? '正在接通麦克风' : recording ? paused ? '慢慢想，我还在' : '可以开始说话了' : '准备好，再继续' }}</h2><p class="journey-subtitle">哪一项新科技，让你对以后的生活有了新的期待？</p>
+      <div class="journey-section-label"><span :class="['status-dot', { live: recording }]" />{{ textMode ? '写给未来的自己' : '此刻，专心听你说' }}</div><h2 role="status">{{ textMode ? '把这一刻，写下来' : connecting ? connectionLabel : recording ? paused ? '慢慢想，我还在' : '可以开始说话了' : '准备好，再继续' }}</h2><p class="journey-subtitle">{{ connecting ? connectionHint : '哪一项新科技，让你对以后的生活有了新的期待？' }}</p>
       <div v-if="!textMode" class="journey-wave large" aria-hidden="true"><i v-for="i in 23" :key="i" :style="{ height: `${6 + level * 50 * (.3 + Math.abs(Math.sin(i)) * .7)}px` }" /></div>
       <label v-if="textMode" class="journey-text-entry"><span>你的讲述</span><textarea v-model="text" placeholder="今天让我印象最深的是……" rows="7" /></label>
       <div v-else class="journey-transcript" role="log" aria-label="实时讲述" aria-live="polite"><span class="journey-section-label">{{ connecting ? '正在连接' : text ? '你的完整讲述' : audioCaptured ? '已收到声音，正在识别' : recording ? '等待你的声音' : '讲述已暂停' }}</span><p>{{ text || '你的第一句话，会出现在这里。' }}</p></div>
       <p class="journey-notice" v-if="notice">{{ notice }}</p><div class="journey-actions"><button class="journey-primary" @click="finishStory" :disabled="!text.trim() && !audioCaptured"><JourneyIcon name="Check" />我说完了</button><button v-if="!recording && !connecting && !textMode" class="journey-secondary" @click="listen"><JourneyIcon name="Mic" />继续录音</button><button class="journey-link" @click="textMode ? (textMode = false, listen()) : useText()">{{ textMode ? '改用语音' : '改用文字' }}</button></div>
       <p class="journey-small" role="status">{{ textMode ? '写完后，把今天留在手记里。' : autoFinishSeconds ? `${autoFinishSeconds} 秒后开始整理，继续说话可接着记录。` : paused ? '还想说些什么，我在听。' : '' }}</p><button class="journey-link muted" @click="reset"><JourneyIcon name="ArrowLeft" :size="15" />结束这次通话</button>
     </div>
-    <div v-else-if="stage === 'generating'" class="journey-generating"><JourneyIcon class="journey-spinner" name="LoaderCircle" :size="42" /><h2>{{ busyLabel }}</h2><p>把你的发现和声音，认真留下。</p><button v-if="journal?.messageToSelf" class="journey-secondary" @click="skipAudio">先看手记<JourneyIcon name="ArrowRight" /></button><button class="journey-link muted" @click="reset">重新开始</button></div>
+    <div v-else-if="stage === 'generating'" class="journey-generating" aria-busy="true"><JourneyWind /><p class="journey-wind-caption" role="status" :aria-label="`正在等待风的来信。${busyLabel}`">正在等待风的来信</p><button v-if="journal?.messageToSelf" class="journey-secondary" @click="skipAudio">先看手记<JourneyIcon name="ArrowRight" /></button><button class="journey-link muted" @click="reset">重新开始</button></div>
     <div v-else-if="['preview', 'playback', 'printing'].includes(stage) && journal" class="journey-result">
       <div class="journey-paper-preview"><JourneyReceipt :journal="journal" /></div>
       <div class="journey-result-content">

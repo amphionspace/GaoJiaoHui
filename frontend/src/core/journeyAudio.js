@@ -3,7 +3,7 @@ import { WS_HOST, api } from './api.js'
 import { createSpeechDetector } from './journeySpeech.js'
 
 export class JourneyRecorder {
-  constructor(key, handlers = {}) {
+  constructor(key, handlers = {}, { context = null } = {}) {
     this.key = key
     this.handlers = handlers
     this.text = ''
@@ -18,6 +18,7 @@ export class JourneyRecorder {
     this.processing = Promise.resolve()
     this.queuedChunks = 0
     this.idleSeconds = 0
+    this.context = context
   }
 
   acceptSegment(message) {
@@ -40,9 +41,36 @@ export class JourneyRecorder {
   }
 
   async start() {
-    try { this.detector = await createSpeechDetector() }
-    catch { throw new Error('人声检测未能启动，请刷新页面重试，或改用文字记录。') }
-    if (this.closed) { await this.detector.dispose(); return }
+    try { await this.startInput() }
+    catch (error) { this.stop(); throw error }
+    finally { clearTimeout(this.startupTimer) }
+  }
+
+  async waitForStart(pending, message, milliseconds = 20000) {
+    let timer
+    try {
+      return await Promise.race([pending, new Promise((_, reject) => {
+        this.rejectStart = () => reject(this.failure || new Error('会话已结束'))
+        timer = setTimeout(() => reject(new Error(message)), milliseconds)
+      })])
+    } finally { clearTimeout(timer); this.rejectStart = null }
+  }
+
+  async startInput() {
+    this.handlers.onPhase?.('microphone')
+    this.mic = new Mic({ context: this.context })
+    // Obtain permission before opening an upstream session that expects incoming audio.
+    await this.waitForStart(this.mic.prepare({ echoCancellation: true, noiseSuppression: true, autoGainControl: false }), '还没有接通麦克风，请在浏览器中允许麦克风权限，再点击继续录音。')
+    if (this.closed) return
+    this.startupTimer = setTimeout(() => this.fail('语音准备超过 20 秒，请检查网络后重试，或改用文字记录。'), 20000)
+    this.handlers.onPhase?.('speech')
+    const pending = createSpeechDetector().then(async detector => {
+      if (this.closed) { await detector.dispose(); return null }
+      return detector
+    })
+    this.detector = await this.waitForStart(pending, '人声检测未能启动，请刷新页面重试，或改用文字记录。')
+    if (this.closed) { await this.detector?.dispose(); this.detector = null; return }
+    this.handlers.onPhase?.('connection')
     const socket = this.socket = new WebSocket(`${WS_HOST}/asr/v1/target-dialogue?api_key=${encodeURIComponent(this.key)}`)
     await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => fail('语音连接超时，请重试。'), 12000)
@@ -84,7 +112,6 @@ export class JourneyRecorder {
     } }))
     try { await sessionReady } catch (error) { this.stop(); throw error }
     if (this.closed) return
-    this.mic = new Mic()
     try {
       await this.mic.start(pcm => {
         if (this.closed || socket.readyState !== WebSocket.OPEN) return
@@ -96,6 +123,7 @@ export class JourneyRecorder {
           .finally(() => { this.queuedChunks-- })
       }, null, { echoCancellation: true, noiseSuppression: true, autoGainControl: false })
     } catch (error) { this.stop(); throw error }
+    if (!this.closed) this.handlers.onPhase?.('ready')
     if (!this.closed) this.micWatchdog = setTimeout(() => {
       if (!this.closed && !this.frames) {
         this.handlers.onError?.('没有收到麦克风音频，请检查输入设备和麦克风权限。')
@@ -143,6 +171,7 @@ export class JourneyRecorder {
     if (this.finishPromise) return this.finishPromise
     this.mic?.stop()
     clearTimeout(this.micWatchdog)
+    clearTimeout(this.startupTimer)
     this.handlers.onLevel?.(0, false)
     this.processing = this.processing.then(async () => {
       if (!this.closed) await this.detector.flush(this.acceptAudio)
@@ -178,6 +207,7 @@ export class JourneyRecorder {
     this.resolveFinal?.(this.text)
     clearTimeout(this.finalTimer)
     clearTimeout(this.micWatchdog)
+    clearTimeout(this.startupTimer)
     if (this.socket) {
       this.socket.onopen = this.socket.onmessage = this.socket.onerror = this.socket.onclose = null
       this.socket.close()

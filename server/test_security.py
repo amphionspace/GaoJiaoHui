@@ -78,6 +78,19 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config.headers['cache-control'], 'no-store')
         self.assertNotIn('api_key', config.text)
 
+    async def test_portrait_frame_allows_only_the_same_site_and_pages_revalidate(self):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url='http://test') as client:
+            kiosk = await client.get('/?display=kiosk')
+            ordinary = await client.get('/')
+            api = await client.get('/api/health?display=kiosk')
+        self.assertEqual(kiosk.headers['x-frame-options'], 'SAMEORIGIN')
+        self.assertEqual(kiosk.headers['content-security-policy'], "frame-ancestors 'self'")
+        self.assertEqual(ordinary.headers['x-frame-options'], 'DENY')
+        self.assertEqual(ordinary.headers['content-security-policy'], "frame-ancestors 'none'")
+        self.assertEqual(api.headers['x-frame-options'], 'DENY')
+        self.assertEqual(ordinary.headers['cache-control'], 'no-cache')
+        self.assertEqual(kiosk.headers['cache-control'], 'no-cache')
+
 
 if __name__ == '__main__':
     unittest.main()

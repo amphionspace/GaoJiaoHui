@@ -147,9 +147,13 @@ async def response_headers(request, call_next):
     response.headers['X-Request-ID'] = uuid.uuid4().hex
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'no-referrer'
-    response.headers['X-Frame-Options'] = 'DENY'
+    kiosk = request.url.path == '/' and request.query_params.get('display') == 'kiosk'
+    response.headers['X-Frame-Options'] = 'SAMEORIGIN' if kiosk else 'DENY'
+    response.headers['Content-Security-Policy'] = "frame-ancestors 'self'" if kiosk else "frame-ancestors 'none'"
     if request.url.path.startswith(('/api/', '/proxy/')):
         response.headers['Cache-Control'] = 'no-store'
+    elif request.url.path in ('/', '/index.html'):
+        response.headers['Cache-Control'] = 'no-cache'
     return response
 
 

@@ -20,7 +20,27 @@ export class SpeechGate {
   flush(emit) { for (const frame of this.pending) this.emitFrame(frame, emit); this.pending = [] }
 }
 
-export async function createSpeechDetector() {
+let preparedDetector = null
+async function loadDetector() {
   const { createDetector } = await import('./journeyVad.js')
   return createDetector()
+}
+
+// Warm only the local detector during the greeting; microphone access waits for it to end.
+export function warmSpeechDetector() {
+  if (!preparedDetector) {
+    const pending = preparedDetector = loadDetector()
+    pending.catch(() => { if (preparedDetector === pending) preparedDetector = null })
+  }
+  return preparedDetector
+}
+export function releasePreparedDetector() {
+  const pending = preparedDetector
+  preparedDetector = null
+  pending?.then(detector => detector.dispose()).catch(() => {})
+}
+export function createSpeechDetector() {
+  const pending = preparedDetector || loadDetector()
+  preparedDetector = null
+  return pending
 }

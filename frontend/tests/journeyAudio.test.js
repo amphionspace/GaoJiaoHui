@@ -21,6 +21,7 @@ async function audioModule(api = async () => ({}), options = {}) {
   class Mic {
     static latest
     constructor() { Mic.latest = this }
+    async prepare() { if (options.permission) await options.permission.promise }
     async start(callback) { this.callback = callback }
     stop() { this.stopped = true }
   }
@@ -55,7 +56,7 @@ async function audioModule(api = async () => ({}), options = {}) {
     }
   }
   const storage = options.storage || new Map()
-  const ctx = vm.createContext({ console, setTimeout, clearTimeout, queueMicrotask, WebSocket: Socket, Blob, FormData, AbortSignal, AbortController, DOMException, crypto: webcrypto, Audio,
+  const ctx = vm.createContext({ console, setTimeout: options.setTimeout || setTimeout, clearTimeout, queueMicrotask, WebSocket: Socket, Blob, FormData, AbortSignal, AbortController, DOMException, crypto: webcrypto, Audio,
     navigator: { locks: options.locks },
     fetch: async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(44) }),
     localStorage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value) },
@@ -66,7 +67,7 @@ async function audioModule(api = async () => ({}), options = {}) {
   await module.link(specifier => {
     const values = specifier === './audio.js'
       ? { Mic, SR: 16000, FRAME: 3200, b64frame: () => 'pcm', wavEncode: () => new Blob(['audio']) }
-      : specifier === './journeySpeech.js' ? { createSpeechDetector: async () => ({
+      : specifier === './journeySpeech.js' ? { createSpeechDetector: async () => options.detector ? options.detector.promise : ({
           process: async (pcm, emit) => emit(pcm, pcm.some(value => value !== 0), pcm.some(value => value !== 0)),
           flush() {}, dispose() {},
         }) }
@@ -126,7 +127,7 @@ test('capture waits for ASR session readiness and leaving cancels initialization
   const recorder = new JourneyRecorder('test-only')
   const starting = recorder.start()
   await new Promise(resolve => setImmediate(resolve))
-  assert.equal(Mic.latest, undefined)
+  assert.equal(Mic.latest.callback, undefined)
   Socket.latest.receive({ type: 'session.created' })
   await starting
   assert.ok(Mic.latest)
@@ -136,6 +137,46 @@ test('capture waits for ASR session readiness and leaving cancels initialization
   await new Promise(resolve => setImmediate(resolve))
   second.stop()
   await assert.rejects(cancelled, /会话已结束/)
+})
+
+test('microphone permission is obtained before opening the upstream session', async () => {
+  const permission = deferred(), phases = []
+  const { JourneyRecorder, Socket } = await audioModule(undefined, { permission })
+  const recorder = new JourneyRecorder('test-only', { onPhase: phase => phases.push(phase) })
+  const starting = recorder.start()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(Socket.latest, undefined)
+  assert.deepEqual(phases, ['microphone'])
+  permission.resolve()
+  await starting
+  assert.deepEqual(phases, ['microphone', 'speech', 'connection', 'ready'])
+  recorder.stop()
+})
+
+test('unanswered microphone permission times out without opening an upstream session', async () => {
+  const permission = deferred()
+  const { JourneyRecorder, Socket, Mic } = await audioModule(undefined, { permission, setTimeout: fn => setTimeout(fn, 5) })
+  const recorder = new JourneyRecorder('test-only')
+  await assert.rejects(recorder.start(), /允许麦克风权限/)
+  assert.ok(Mic.latest.stopped)
+  assert.equal(Socket.latest, undefined)
+  permission.resolve()
+})
+
+test('a detector that arrives after cancellation is released and cannot start recording', async () => {
+  const detector = deferred()
+  const { JourneyRecorder, Socket, Mic } = await audioModule(undefined, { detector })
+  const recorder = new JourneyRecorder('test-only')
+  const starting = recorder.start()
+  await new Promise(resolve => setImmediate(resolve))
+  recorder.stop()
+  await assert.rejects(starting, /会话已结束/)
+  let disposed = false
+  detector.resolve({ dispose() { disposed = true } })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.ok(disposed)
+  assert.ok(Mic.latest.stopped)
+  assert.equal(Socket.latest, undefined)
 })
 
 test('ASR errors during finalization keep the transcript and fail explicitly', async () => {
@@ -441,4 +482,29 @@ test('microphone permission resolving after stop immediately releases the device
   await starting
   assert.ok(stopped)
   assert.equal(mic.stream, null)
+})
+
+test('microphone reuses the unlocked output context without closing it or asking permission twice', async () => {
+  let requests = 0, stopped = false, closed = false, resumed = false
+  const context = {
+    state: 'running', sampleRate: 48000,
+    resume() { resumed = true }, close() { closed = true },
+    createMediaStreamSource: () => ({ connect() {}, disconnect() {} }),
+    createScriptProcessor: () => ({ connect() {}, disconnect() {} }),
+  }
+  const ctx = vm.createContext({ navigator: { mediaDevices: { async getUserMedia() {
+    requests++
+    return { getTracks: () => [{ stop() { stopped = true } }] }
+  } } } })
+  const module = new vm.SourceTextModule(await readFile(new URL('../src/core/audio.js', import.meta.url), 'utf8'), { context: ctx })
+  await module.link(() => { throw Error('unexpected import') })
+  await module.evaluate()
+  const mic = new module.namespace.Mic({ context })
+  await mic.prepare()
+  await mic.start(() => {})
+  assert.equal(requests, 1)
+  assert.equal(resumed, false)
+  mic.stop()
+  assert.ok(stopped)
+  assert.equal(closed, false)
 })

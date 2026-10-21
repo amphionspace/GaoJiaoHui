@@ -77,6 +77,7 @@ async function mount(name, options = {}) {
     else if (specifier.endsWith('/store.js')) values = { store, setApiKey: k => { store.apiKey = k }, log() {}, dlog() {} }
     else if (specifier.endsWith('/audio.js')) values = { Mic, SR: 16000, wavEncode: () => new Blob(['wav']), fileToPCM: async () => new Int16Array(80000) }
     else if (specifier.endsWith('/journeyAudio.js')) values = { JourneySound: Sound, JourneyVoice: Voice, JourneyRecorder: Recorder, cleanJourneyVoices() {}, voiceFailureMessage: e => e.message }
+    else if (specifier.endsWith('/journeySpeech.js')) values = { warmSpeechDetector: () => Promise.resolve(), releasePreparedDetector() {} }
     else values = { default: {} }
     return new vm.SyntheticModule(Object.keys(values), function () { for (const [k, v] of Object.entries(values)) this.setExport(k, v) }, { context })
   })
