@@ -1,0 +1,22 @@
+{
+  "commit": "38dd014",
+  "url": "https://amphion-gjh.amphiondev.com/?view=portrait",
+  "viewport": [2160, 3840],
+  "frontend_tests": 63,
+  "backend_tests": 36,
+  "production_build": "passed",
+  "public_health": "passed",
+  "public_portrait_frame": "passed",
+  "public_text_reply": "passed",
+  "receipt_labels": ["安菲翁科技", "Tomorrow"],
+  "loading_caption": "正在等待风的来信",
+  "loading_motion": "Three letters observed with changing transform matrices",
+  "receipt_animation_seconds": 2.4,
+  "asr_session_ready_seconds": [0.238, 0.157, 0.141],
+  "wasm_download_seconds": 0.672,
+  "vad_model_download_seconds": 0.558,
+  "microphone": "Permission refusal and timeout recovery verified; physical recording not completed because local OS permission could not be resolved while the computer was locked.",
+  "timing_scope": "ASR timings exclude browser permission and local audio/VAD initialization.",
+  "release": "/opt/amphion-gjh/releases/demo1-38dd014",
+  "rollback_config": "/opt/amphion-gjh-backups/20261021-pre-38dd014/demo1.conf"
+}
