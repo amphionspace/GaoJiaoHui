@@ -1,0 +1,39 @@
+{
+  "base": "https://amphion-gjh.amphiondev.com",
+  "fixture": "synthetic Chinese speech; not a personal voice similarity test",
+  "health": {
+    "status": "ok",
+    "scope": "application",
+    "version": "demo1",
+    "frontend_built": true
+  },
+  "invalid_key_status": 401,
+  "tts_model": "qwen3.5-omni-plus",
+  "transcript": "今天在高交会上看到一个帮助老人拿药的机器人，我想做一个更容易使用的提醒工具，让爸妈少忘记吃药。这就是我今天想留下的想法。",
+  "asr_events": [
+    "session.created",
+    "session.done",
+    "speaker.sample.progress",
+    "transcription.final",
+    "transcription.partial"
+  ],
+  "note": {
+    "summary": "今天在高交会上看到一台帮老人拿药的机器人，我想做一个更容易使用的提醒工具，让爸妈少忘记吃药。这是今天想留下的想法。",
+    "message": "那台机器人是替人拿药的，你想的是替爸妈记住吃药。这份心，他们会用得上。",
+    "takeaway": "那台机器人是替人拿药的，你想的是替爸妈记住吃药。",
+    "keywords": [
+      "提醒工具",
+      "爸妈吃药",
+      "高交会机器人"
+    ],
+    "generation": "model",
+    "model": "deepseek-flash"
+  },
+  "compose_seconds": 10.15,
+  "enrollment_seconds": 1.64,
+  "synthesis_seconds": 2.42,
+  "audio_seconds": 7.92,
+  "audio_rate": 24000,
+  "audio_rms": 2481,
+  "cleanup_status": 200
+}

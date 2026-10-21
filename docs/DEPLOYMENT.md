@@ -11,7 +11,7 @@
 
 建议目录 `/opt/amphion-gjh/releases/<version>`，`/opt/amphion-gjh/current` 指向通过验收的版本，每版包含 `.venv`、`frontend/dist` 和 `server`。私密环境文件放 `/etc/amphion-gjh/runtime.env`，权限 600，由系统服务读取。
 
-`deploy/amphion-gjh.service` 是待审阅模板，使用专用 `amphion` 用户、只读文件系统与故障重启。**现有服务器有自己的服务及路径，先对照再调整，不能直接覆盖现有 unit。** 本轮未修改线上服务。
+`deploy/amphion-gjh.service` 是待审阅模板，使用专用 `amphion` 用户、只读文件系统与故障重启。启动前创建 `.journey-state` 并使运行账号拥有该目录，私密 JSON 配置也须允许该账号读取。**现有服务器有自己的服务及路径，先对照再调整，不能直接覆盖现有 unit。** 2026-10-21 已部署的实际路径与回滚方式见 [demo1 发布记录](DEMO1.md)。
 
 HTTPS 入口反代到 `127.0.0.1:8766`；反代超时至少 300 秒。设置连接/请求频率与上传大小限制，不记录带 `api_key` 查询参数的 WS URL，不开放内部模型端口。
 
