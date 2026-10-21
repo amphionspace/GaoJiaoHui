@@ -19,6 +19,7 @@
 import os
 import typing
 import logging
+import mimetypes
 import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -64,6 +65,12 @@ PORT = int(os.environ.get("PORT", "8766"))
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VERSION = (Path(ROOT) / 'VERSION').read_text(encoding='utf-8').strip()
 DIST = os.path.join(ROOT, "frontend", "dist")
+# Minimal Linux MIME databases may omit resources required by the kiosk.
+for extension, content_type in {
+    '.webp': 'image/webp', '.woff2': 'font/woff2',
+    '.wasm': 'application/wasm', '.onnx': 'application/octet-stream',
+}.items():
+    mimetypes.add_type(content_type, extension)
 HOP_HEADERS = {"host", "connection", "content-length", "transfer-encoding",
                "accept-encoding", "origin", "referer", "user-agent"}
 

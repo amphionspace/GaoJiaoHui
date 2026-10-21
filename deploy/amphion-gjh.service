@@ -17,6 +17,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
+ReadWritePaths=/opt/amphion-gjh/current/.journey-state
 UMask=0077
 
 [Install]
