@@ -1,0 +1,32 @@
+/* The portrait kiosk uses explicit type sizes rather than scaling text with viewport width. */
+.journey-2036 .journey-home-content{padding:38px 0 60px}
+.journey-2036.journey-home h1{font-size:80px;line-height:1.16}.journey-2036 h1 b{font-family:Georgia,serif;font-weight:400}
+.journey-2036 .journey-eyebrow{font-size:28px}.journey-2036 .journey-tagline{font-size:21px}.journey-2036 .journey-consent{font-size:16px}
+.journey-2036 .journey-topline{font-size:14px}.journey-2036 .journey-windowbar{font-size:13px}
+.journey-2036 .call-marginal{font-size:12px}.journey-2036 .call-marginal em{font-size:23px}.journey-2036 .call-collage figcaption{font-size:13px;margin-top:0}
+.journey-2036 .journey-intro{width:min(1120px,calc(100% - 90px));padding:35px 0 70px;position:relative}
+.journey-2036 .story-caption{font-family:var(--j-display);font-size:28px;font-weight:400;line-height:1.8;color:#828d7f;margin:70px 0 28px}
+.journey-2036 .story-controls{display:flex;justify-content:center;gap:18px}.journey-2036 .story-controls button{width:50px;height:50px;color:#738370;background:transparent;border:1px solid #c6cec3}
+.journey-story-page .journey-windowbar,.journey-receipt-page .journey-windowbar{display:none}
+.journey-2036 .journey-brand{margin-top:38px}.journey-2036 .journey-listening .story-caption{margin:0 0 32px}
+.journey-2036 .journey-generating{gap:20px;padding:45px 24px}.journey-2036 .journey-meteor-caption{font:20px/1.8 var(--j-display);margin:0;color:#6e7c6e}
+.journey-2036 .journey-result{display:flex;flex-direction:column;width:min(600px,calc(100% - 56px));gap:28px;max-width:none;margin:32px auto 70px;padding:0}
+.journey-2036 .journey-paper-preview{width:100%}.journey-2036 .journey-result-content{order:0;width:100%;text-align:center;padding:0}.journey-2036 .journey-result .journey-actions{justify-content:center;margin:0}
+.journey-2036 .journey-result .journey-primary{min-width:190px;font-size:20px;min-height:60px}
+.journey-2036 .journey-result .journey-notice{font-size:14px}
+@media(max-width:700px){
+  .journey-2036 .journey-home-content{padding:30px 0 45px}.journey-2036.journey-home h1{font-size:64px}.journey-2036 .journey-eyebrow{font-size:25px}.journey-2036 .journey-tagline{font-size:17px;max-width:100%;text-wrap:balance}.journey-2036 .journey-consent{font-size:14px}.journey-2036 .journey-topline{font-size:12px}.journey-2036 .journey-topline span:last-child{display:none}.journey-2036 .journey-windowbar{font-size:11px}.journey-2036 .call-marginal{font-size:10px}.journey-2036 .call-marginal em{font-size:18px}.journey-2036 .call-collage{grid-template-columns:1fr 3.2fr 1fr}.journey-2036 .call-phone-photo{height:150px}.journey-2036 .call-collage figcaption{font-size:12px}.journey-2036 .journey-intro{width:calc(100% - 42px)}.journey-2036 .story-caption{font-size:24px;margin-top:65px}.journey-2036 .journey-result{width:calc(100% - 40px)}.journey-2036 .journey-meteor-caption{font-size:17px}
+}
+@media(max-width:360px){.journey-2036.journey-home h1{font-size:54px}.journey-2036 .journey-consent{font-size:12px}.journey-2036 .call-collage figcaption{font-size:10px}}
+@media(orientation:portrait) and (min-width:701px){
+  .journey-2036.journey-home h1{font-size:126px}.journey-2036 .journey-eyebrow{font-size:38px}.journey-2036 .journey-tagline{font-size:28px}.journey-2036 .journey-consent{font-size:22px}.journey-2036 .call-marginal{font-size:19px}.journey-2036 .call-marginal em{font-size:34px}.journey-2036 .call-collage figcaption{font-size:19px}.journey-2036 .story-caption{font-size:38px;margin-top:100px}.journey-2036 .journey-result{width:min(680px,calc(100% - 100px))}
+}
+@media(orientation:portrait) and (min-width:1800px){
+  .journey-2036 .journey-windowbar{font-size:38px;padding:28px 40px}.journey-2036 .journey-topline{font-size:40px;padding-top:52px}
+  .journey-2036 .journey-home-content{padding:100px 0 200px}.journey-2036.journey-home h1{font-size:270px;line-height:1.2}.journey-2036 .journey-eyebrow{font-size:80px;margin-bottom:65px}.journey-2036 .journey-tagline{font-size:64px;margin:65px 0 75px}.journey-2036 .journey-consent{font-size:48px;margin-top:65px}.journey-2036 .journey-consent input{width:46px;height:46px}.journey-2036 .journey-home-actions{width:1150px}.journey-2036 .call-start{font-size:68px;min-height:200px}.journey-2036 .call-start svg{width:64px;height:64px}
+  .journey-2036 .call-collage{width:1700px;margin-top:80px;gap:45px}.journey-2036 .call-phone-photo{height:700px}.journey-2036 .call-marginal{font-size:40px}.journey-2036 .call-marginal em{font-size:68px}.journey-2036 .call-collage figcaption{font-size:40px;padding-top:35px}
+  .journey-2036 .journey-brand{margin-top:90px;font-size:56px}.journey-2036 .journey-brand .journey-icon-button{width:112px;height:112px}
+  .journey-2036 .journey-intro{width:calc(100% - 180px);max-width:1980px;padding:120px 0 200px}.journey-2036 .story-caption{font-size:72px;margin:200px 0 100px}.journey-2036 .story-controls{gap:50px}.journey-2036 .story-controls button{width:120px;height:120px;border-width:2px}.journey-2036 .story-controls svg{width:46px;height:46px}
+  .journey-2036 .journey-listening .story-caption{margin-bottom:60px}.journey-2036 .journey-meteor-caption{font-size:54px}.journey-2036 .journey-generating{padding:90px 100px;gap:45px}
+  .journey-2036 .journey-result{width:1440px;max-width:calc(100% - 240px);margin:100px auto 160px;gap:70px}.journey-2036 .journey-result .journey-primary{min-width:640px;min-height:160px;font-size:56px}.journey-2036 .journey-result .journey-notice{font-size:34px}.journey-2036 .journey-result .journey-actions{gap:35px}.journey-2036 .journey-play{width:130px;height:130px}
+}

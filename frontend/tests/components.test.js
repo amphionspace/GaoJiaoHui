@@ -72,7 +72,8 @@ async function mount(name, options = {}) {
     if (specifier === 'vue') values = Vue
     else if (specifier.endsWith('/session.js')) values = sessions
     else if (specifier.endsWith('/speechQueue.js')) values = queues
-    else if (specifier.endsWith('/journey.js')) values = { ...journey, composeJourneyJournal: options.compose || journey.composeJourneyJournal }
+    else if (specifier.endsWith('/journey.js')) values = { ...journey, composeJourneyJournal: options.compose || journey.composeJourneyJournal,
+      illustrateJourneyJournal: options.illustrate || (async () => ({ sketch: 'data:image/png;base64,dGVzdA==', imageModel: 'test' })) }
     else if (specifier.endsWith('/api.js')) values = { WS_HOST: 'wss://test.invalid', boundedFetch: fetch }
     else if (specifier.endsWith('/store.js')) values = { store, setApiKey: k => { store.apiKey = k }, log() {}, dlog() {} }
     else if (specifier.endsWith('/audio.js')) values = { Mic, SR: 16000, wavEncode: () => new Blob(['wav']), fileToPCM: async () => new Int16Array(80000) }
@@ -237,6 +238,57 @@ test('leaving during introduction never opens the microphone later', async () =>
   intro.resolve(true); await starting
   assert.equal(recorders.length, 0)
   assert.equal(state.introPlaying, false)
+  app.unmount()
+})
+
+test('all four story chapters finish before recording; no old chapter continues after skip', async () => {
+  const { state, sounds, recorders, app } = await mount('BoothJourney')
+  await state.beginJourney()
+  assert.equal(sounds[0].plays, 4)
+  assert.equal(state.introChapter, 3)
+  assert.equal(recorders.length, 1)
+  app.unmount()
+  const intro = deferred()
+  const skipped = await mount('BoothJourney', { intro })
+  const starting = skipped.state.beginJourney()
+  skipped.state.useText()
+  intro.resolve(true); await starting
+  assert.equal(skipped.sounds[0].plays, 1)
+  assert.equal(skipped.state.textMode, true)
+  skipped.app.unmount()
+})
+
+test('illustration resolving after reset cannot restore the old journal', async () => {
+  const pending = deferred()
+  const { state, app } = await mount('BoothJourney', {
+    compose: async draft => ({ ...draft, summary: '我想在2036年和爸妈一起旅行。', messageToSelf: '把想念留给相聚。' }),
+    illustrate: () => pending.promise,
+  })
+  state.journal = journey.createJourneyJournal('2036年，我想和爸妈旅行。', 'future')
+  const job = state.composeNote(); await tick()
+  assert.equal(state.stage, 'generating')
+  state.reset()
+  pending.resolve({ sketch: 'late' }); await job
+  assert.equal(state.stage, 'welcome')
+  assert.equal(state.journal, null)
+  app.unmount()
+})
+
+test('image failure preserves text and retries only the image, without regenerating the reply', async () => {
+  let textCalls = 0, imageCalls = 0
+  const { state, app } = await mount('BoothJourney', {
+    compose: async draft => { textCalls++; return { ...draft, summary: '我想在2036年和爸妈旅行。', messageToSelf: '把想念留给相聚。' } },
+    illustrate: async () => { if (++imageCalls === 1) throw new Error('图片超时'); return { sketch: 'retried image' } },
+  })
+  state.journal = journey.createJourneyJournal('2036年，我想和爸妈旅行。', 'future')
+  await state.composeNote()
+  assert.equal(state.stage, 'preview')
+  assert.equal(state.imageIssue, '图片超时')
+  assert.ok(state.journal.summary)
+  await state.retryIllustration()
+  assert.equal(state.journal.sketch, 'retried image')
+  assert.equal(state.imageIssue, '')
+  assert.equal(textCalls, 1)
   app.unmount()
 })
 

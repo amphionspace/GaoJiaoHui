@@ -57,7 +57,7 @@ export function createJourneyJournal(text, topicId, now = new Date()) {
   if (!clean) throw new Error('还没有记录到内容，再讲一点吧。')
   const illustration = /机器人/.test(clean) ? 'robot' : /咖啡/.test(clean) ? 'coffee' : /无人机|飞行|卫星|航天/.test(clean) ? 'space' : topicId
   return {
-    title: topicId === 'future' ? '和未来的自己对话' : topicId === 'idea' ? '未来，从这个想法开始' : topicId === 'story' ? '把今天，留给未来' : '今天，我遇见了未来',
+    title: topicId === 'future' ? '我期待的 2036' : topicId === 'idea' ? '未来，从这个想法开始' : topicId === 'story' ? '把今天，留给未来' : '今天，我遇见了未来',
     summary: '', messageToSelf: '', takeaway: '', keywords: [], generation: 'pending',
     sourceText: clean, originalText: original, topicId, illustration,
     date: now.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }),
@@ -92,5 +92,17 @@ export async function composeJourneyJournal(journal, { signal, apiKey = '', requ
     throw new Error('这次回信太长，完整讲述已保留，请重新整理。')
   }
   return { ...journal, summary: data.summary, messageToSelf: data.message, takeaway: data.takeaway || '', keywords: data.keywords,
-    generation: 'model', textModel: data.model }
+    generation: 'model', textModel: data.model, sketchPrompt: data.sketch_prompt || '' }
+}
+
+export async function illustrateJourneyJournal(journal, { signal, apiKey = '', request = fetch } = {}) {
+  const response = await request('/api/journey/illustrate', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(105000)]) : AbortSignal.timeout(105000),
+    body: JSON.stringify({ summary: journal.summary, scene: journal.sketchPrompt || '' }),
+  })
+  const data = await response.json()
+  if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : '插画暂时未能生成，可以重试或打印文字手记。')
+  if (!/^data:image\/png;base64,[A-Za-z0-9+/]+=*$/.test(data.image || '')) throw new Error('未收到有效插画，请重试。')
+  return { sketch: data.image, imageModel: data.model }
 }

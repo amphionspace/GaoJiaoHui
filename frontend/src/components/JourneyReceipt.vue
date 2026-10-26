@@ -3,18 +3,19 @@ defineProps({ journal: { type: Object, required: true } })
 </script>
 
 <template>
-  <article class="journey-receipt" aria-label="未来来电纪念便签">
+  <article class="journey-receipt" aria-label="和 2036 对话纪念便签">
     <header class="receipt-masthead">
       <div class="receipt-kicker"><span>高交会 · 安菲翁科技</span><span>私人珍藏版</span></div>
-      <strong>未来来电</strong>
-      <p lang="en">The Future Post</p>
+      <strong>和 2036 对话</strong>
+      <p lang="en">A Letter to 2036</p>
     </header>
     <div class="receipt-meta"><time>{{ journal.date }}</time><span>NO. {{ journal.number }}</span></div>
     <section class="receipt-story">
-      <div class="receipt-section-label"><span>01 / 此刻手记</span><span lang="en">TODAY</span></div>
+      <div class="receipt-section-label"><span>01 / 我的未来想象</span><span lang="en">Today</span></div>
       <h3>{{ journal.title }}</h3>
       <p class="receipt-summary">{{ journal.summary || journal.sourceText }}</p>
     </section>
+    <figure v-if="journal.sketch" class="receipt-sketch"><img :src="journal.sketch" :alt="`未来想象的简笔画：${journal.summary}`" width="1024" height="768" /></figure>
     <div v-if="journal.keywords.length" class="receipt-index">
       <span class="receipt-index-label">这通电话<br />关于</span>
       <p><span v-for="(word, index) in journal.keywords" :key="word"><i>{{ String(index + 1).padStart(2, '0') }}</i>{{ word }}</span></p>
@@ -25,7 +26,7 @@ defineProps({ journal: { type: Object, required: true } })
       <p class="receipt-signature">以后的我，留给现在的我。</p>
     </section>
     <p v-else-if="!journal.messageToSelf" class="receipt-pending">讲述已留存，等待整理</p>
-    <footer class="receipt-footer"><em lang="en">Keep this moment.</em><span>一通电话，一份只属于你的记录。</span><div><span>从今天出发</span><span>寄给以后的自己</span></div></footer>
+    <footer class="receipt-footer"><em lang="en">See you in 2036.</em><div><span>从今天出发</span><span>寄给 2036 的自己</span></div></footer>
   </article>
 </template>
 
@@ -45,6 +46,10 @@ h3{font-family:inherit;font-size:24px;font-weight:600;line-height:1.6;margin:15p
 @media screen and (orientation:portrait) and (min-width:1800px){
   .journey-receipt{max-width:980px;padding:64px;border-width:2px}.receipt-kicker{font-size:22px;padding-bottom:24px;margin-bottom:32px;gap:20px}.receipt-masthead strong{font-size:96px}.receipt-masthead>p{font-size:48px;margin:10px 0 36px}.receipt-meta{font-size:22px;padding:16px 0;border-top-width:6px;border-bottom-width:2px}.receipt-story{padding:44px 0}.receipt-section-label{font-size:20px;gap:20px}h3{font-size:48px;margin:30px 0 36px}.receipt-summary{font-size:40px}.receipt-summary::first-letter{font-size:84px;margin:4px 12px 0 0}.receipt-index{grid-template-columns:124px minmax(0,1fr);gap:32px;padding:28px 0;border-width:2px}.receipt-index-label{font-size:22px}.receipt-index p{gap:16px 30px}.receipt-index p>span{font-size:26px}.receipt-index i{font-size:20px;margin-right:10px}.receipt-reply{padding:46px 0 40px}.receipt-reply blockquote{margin:32px 0 24px;padding-left:38px;border-width:4px}.receipt-quote-mark{font-size:86px}.receipt-reply blockquote p{font-size:52px;margin-top:-18px}.receipt-signature{font-size:24px;margin-top:28px}.receipt-footer{padding-top:38px;gap:18px;border-width:6px}.receipt-footer>em{font-size:46px}.receipt-footer>span{font-size:22px}.receipt-footer>div{font-size:20px;padding-top:24px;margin-top:16px;border-width:2px}
 }
+.receipt-sketch{margin:0 0 22px}.receipt-sketch img{display:block;width:100%;height:auto;aspect-ratio:4/3;object-fit:contain;mix-blend-mode:multiply}
+@media screen{.journey-receipt{max-width:600px}.receipt-masthead strong{font-size:38px}}
+@media screen and (orientation:portrait) and (min-width:701px){.journey-receipt{max-width:680px}}
+@media screen and (orientation:portrait) and (min-width:1800px){.journey-receipt{max-width:1440px;padding:70px 85px}.receipt-masthead strong{font-size:110px}.receipt-kicker,.receipt-meta,.receipt-section-label{font-size:32px}.receipt-summary{font-size:48px;line-height:1.9}.receipt-sketch{margin:0 0 44px}.receipt-index-label{font-size:30px}.receipt-index p>span{font-size:34px}.receipt-signature{font-size:32px}.receipt-footer>div{font-size:30px}}
 @media print{
   .journey-receipt{width:72mm;max-width:100%;padding:3mm 4mm;background:#fff;border:0;box-shadow:none;color:#000;break-inside:avoid}.journey-receipt::after{display:none}.receipt-masthead strong{font-size:26pt}.receipt-masthead>p{font-size:15pt;color:#000}.receipt-kicker,.receipt-meta,.receipt-section-label{font-size:7pt;color:#333}.receipt-story{padding:5mm 0}h3{font-size:15pt;margin:3mm 0}.receipt-summary{font-size:11pt;line-height:1.8}.receipt-summary::first-letter{font-size:24pt;color:#000}.receipt-index{grid-template-columns:12mm 1fr;gap:3mm;padding:3mm 0}.receipt-index-label,.receipt-index i{font-size:7pt;color:#333}.receipt-index p>span{font-size:8pt;color:#000}.receipt-reply{padding:5mm 0}.receipt-reply blockquote{margin:3mm 0;padding-left:3mm;border-color:#555}.receipt-reply blockquote p{font-size:14pt;color:#000}.receipt-quote-mark{color:#555}.receipt-signature{font-size:8pt}.receipt-footer{padding-top:4mm}.receipt-footer>em{font-size:14pt}.receipt-footer>span,.receipt-footer>div{font-size:7pt;color:#333}
 }

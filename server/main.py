@@ -33,10 +33,12 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 try:
     from .journey_text import router as journey_text_router
+    from .journey_image import router as journey_image_router
     from .security import RequestLimits
     from . import bailian_tts
 except ImportError:
     from journey_text import router as journey_text_router
+    from journey_image import router as journey_image_router
     from security import RequestLimits
     import bailian_tts
 
@@ -121,6 +123,7 @@ class LegacyGatewayTransport(httpx.AsyncBaseTransport):
 app = FastAPI(title="Amphion Voice Booth")
 app.add_middleware(RequestLimits)
 app.include_router(journey_text_router)
+app.include_router(journey_image_router)
 app.state.bailian_client = httpx.AsyncClient(timeout=300, trust_env=False)
 
 

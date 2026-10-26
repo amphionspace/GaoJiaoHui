@@ -45,7 +45,7 @@ onMounted(() => { health.value && health.value.checkHealth() })
       <button class="mini" @click="health.checkHealth()">检查</button>
     </div>
   </header>
-  <div v-else class="journey-appbar"><span><JourneyIcon name="Phone" :size="18" />未来来电 <small>FUTURE CALL / demo1</small></span><div class="journey-appbar-actions"><a v-if="!kiosk" href="?view=portrait" title="竖屏体验" aria-label="竖屏体验"><Smartphone :size="19" /></a><button title="连接设置" aria-label="连接设置" @click="openSettings"><JourneyIcon name="Settings2" :size="19" /></button></div></div>
+  <div v-else class="journey-appbar"><span><JourneyIcon name="Phone" :size="18" />和 2036 对话 <small>demo1</small></span><div class="journey-appbar-actions"><a v-if="!kiosk" href="?view=portrait" title="竖屏体验" aria-label="竖屏体验"><Smartphone :size="19" /></a><button title="连接设置" aria-label="连接设置" @click="openSettings"><JourneyIcon name="Settings2" :size="19" /></button></div></div>
   <nav v-if="tab !== 0">
     <button v-for="(t, i) in TABS" :key="i" :class="{active: tab === i}" @click="tab = i">{{ t }}</button>
   </nav>

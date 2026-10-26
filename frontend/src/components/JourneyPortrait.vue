@@ -30,14 +30,14 @@ onBeforeUnmount(() => { observer?.disconnect(); clearTimeout(copyTimer) })
   <div ref="shell" class="portrait-experience">
     <div class="portrait-toolbar">
       <a href="/" aria-label="返回普通页面" title="返回普通页面"><ArrowLeft :size="20" /></a>
-      <span>未来来电 <small>竖屏体验</small></span>
+      <span>和 2036 对话 <small>竖屏体验</small></span>
       <button :title="copied ? '链接已复制' : '复制体验链接'" :aria-label="copied ? '链接已复制' : '复制体验链接'" @click="copyLink"><Check v-if="copied" :size="20" /><Copy v-else :size="20" /></button>
       <button title="全屏体验" aria-label="全屏体验" @click="fullscreen"><Maximize2 :size="20" /></button>
       <span class="portrait-copy-status" role="status">{{ copied ? '链接已复制' : '' }}</span>
     </div>
     <div ref="viewport" class="portrait-viewport">
       <div class="portrait-screen" :style="frameStyle">
-        <iframe title="未来来电竖屏体验" :src="source.href" allow="microphone; autoplay; fullscreen" :style="{ transform: `scale(${scale})` }" />
+        <iframe title="和 2036 对话竖屏体验" :src="source.href" allow="microphone; autoplay; fullscreen" :style="{ transform: `scale(${scale})` }" />
       </div>
     </div>
   </div>

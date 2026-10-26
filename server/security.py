@@ -75,7 +75,7 @@ class RequestLimits:
         if scope['type'] != 'http' or scope['method'] not in ('POST', 'PUT', 'PATCH'):
             return await self.app(scope, receive, send)
         path = scope['path']
-        limit = 64 * 1024 if path == '/api/journey/compose' else 2 * 1024 * 1024 if path.startswith('/api/journey/tts/') else 20 * 1024 * 1024
+        limit = 64 * 1024 if path in ('/api/journey/compose', '/api/journey/illustrate') else 2 * 1024 * 1024 if path.startswith('/api/journey/tts/') else 20 * 1024 * 1024
         messages, size = [], 0
         deadline = time.monotonic() + 30
         try:
