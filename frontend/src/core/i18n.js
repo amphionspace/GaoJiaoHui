@@ -64,6 +64,7 @@ const EN = {
   '注册后即成可复刻音色': 'Ready to clone after registration', '音色配额': 'Voice quota', '删除选中': 'Delete selected', '本地 Qwen3-TTS-1.7B': 'Local Qwen3-TTS-1.7B', '火山 seed-iclv2': 'Volcengine seed-iclv2',
   '播放该录音': 'Play this recording', '停止播放': 'Stop playback', '删除该录音': 'Delete this recording',
   '全屏体验': 'Fullscreen', '链接已复制': 'Link copied', '复制体验链接': 'Copy experience link', '返回普通页面': 'Back to standard view',
+  '切换语言': 'Switch language', '和 2036 对话竖屏体验': 'Conversation with 2036 portrait experience',
   '竖屏体验': 'Portrait experience', '未来来电 · FUTURE CALL': 'Future call · FUTURE CALL',
   '蓝牙耳机与第一代无线耳机': 'Bluetooth earbuds and the first wireless earbuds', '围棋棋盘与落子': 'A Go board and a stone', '城市中的无人驾驶汽车': 'Self-driving cars in the city', '驶向太空的红色跑车': 'A red sports car heading into space',
   '一部红色转盘座机电话': 'A red rotary telephone', '同一人可录多段，每段 5–10 秒。': 'One person can record several clips, 5–10 seconds each.', '开始识别': 'Start recognition', '二进制帧': 'binary frames', '— 音色列表 —': '— Voice list —', '克隆音色就绪后，点击麦克风开始——说出的话将以该音色实时复述': 'When the cloned voice is ready, click the microphone to start — your words will be repeated in that voice', '给今天的自己留一句话，慢慢来，也可以继续向前。': 'Leave a line for yourself today. Take your time, and keep moving forward.',
