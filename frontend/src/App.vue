@@ -6,6 +6,7 @@
          流式转写 WS /asr/v1/target-dialogue；原调试·流式转写 / 多人分离 / 声纹克隆页暂下线，组件文件保留） */
 import { ref, onMounted, watch } from 'vue'
 import { store, setApiKey } from './core/store.js'
+import { toggleLocale, tr } from './core/i18n.js'
 import HealthBadge from './components/HealthBadge.vue'
 import LogPanel from './components/LogPanel.vue'
 import BoothJourney from './components/BoothJourney.vue'
@@ -27,6 +28,7 @@ const health = ref(null)
 const settings = ref(null)
 function openSettings() { settings.value?.showModal() }
 function saveSettings() { setApiKey(keyInput.value); settings.value?.close() }
+function changeLanguage() { toggleLocale() }
 
 onMounted(() => { health.value && health.value.checkHealth() })
 </script>
@@ -43,9 +45,10 @@ onMounted(() => { health.value && health.value.checkHealth() })
       <label class="sub" style="display:inline-flex;gap:5px;align-items:center;cursor:pointer">
         <input type="checkbox" v-model="store.demoMode">简洁日志</label>
       <button class="mini" @click="health.checkHealth()">检查</button>
+      <button class="mini language-switch" type="button" @click="changeLanguage">{{ store.locale === 'en' ? '中' : 'EN' }}</button>
     </div>
   </header>
-  <div v-else class="journey-appbar"><span><JourneyIcon name="Phone" :size="18" />和 2036 对话 <small>demo1</small></span><div class="journey-appbar-actions"><a v-if="!kiosk" href="?view=portrait" title="竖屏体验" aria-label="竖屏体验"><Smartphone :size="19" /></a><button title="连接设置" aria-label="连接设置" @click="openSettings"><JourneyIcon name="Settings2" :size="19" /></button></div></div>
+  <div v-else class="journey-appbar"><span><JourneyIcon name="Phone" :size="18" />和 2036 对话 <small>demo1</small></span><div class="journey-appbar-actions"><button class="language-switch" type="button" @click="changeLanguage">{{ store.locale === 'en' ? '中' : 'EN' }}</button><a v-if="!kiosk" :href="`?view=portrait&lang=${store.locale}`" title="竖屏体验" aria-label="竖屏体验"><Smartphone :size="19" /></a><button title="连接设置" aria-label="连接设置" @click="openSettings"><JourneyIcon name="Settings2" :size="19" /></button></div></div>
   <nav v-if="tab !== 0">
     <button v-for="(t, i) in TABS" :key="i" :class="{active: tab === i}" @click="tab = i">{{ t }}</button>
   </nav>

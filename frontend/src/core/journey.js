@@ -51,16 +51,18 @@ export function cleanSpokenText(text) {
     .trim()
 }
 
-export function createJourneyJournal(text, topicId, now = new Date()) {
+export function createJourneyJournal(text, topicId, now = new Date(), language = 'zh') {
   const original = String(text || '')
   const clean = cleanSpokenText(endingIntent(original)?.text ?? original)
   if (!clean) throw new Error('还没有记录到内容，再讲一点吧。')
   const illustration = /机器人/.test(clean) ? 'robot' : /咖啡/.test(clean) ? 'coffee' : /无人机|飞行|卫星|航天/.test(clean) ? 'space' : topicId
   return {
-    title: topicId === 'future' ? '我期待的 2036' : topicId === 'idea' ? '未来，从这个想法开始' : topicId === 'story' ? '把今天，留给未来' : '今天，我遇见了未来',
+    title: language === 'en'
+      ? (topicId === 'future' ? 'What I Hope for in 2036' : topicId === 'idea' ? 'The Future Starts with This Idea' : topicId === 'story' ? 'Keeping Today for Tomorrow' : 'Today, I Met the Future')
+      : (topicId === 'future' ? '我期待的 2036' : topicId === 'idea' ? '未来，从这个想法开始' : topicId === 'story' ? '把今天，留给未来' : '今天，我遇见了未来'),
     summary: '', messageToSelf: '', takeaway: '', keywords: [], generation: 'pending',
     sourceText: clean, originalText: original, topicId, illustration,
-    date: now.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }),
+    date: now.toLocaleDateString(language === 'en' ? 'en-CA' : 'zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }),
     number: `${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`,
     revision: 0,
   }
@@ -76,12 +78,12 @@ export function editJourneyJournal(journal, instruction) {
     summary: '', messageToSelf: '', takeaway: '', keywords: [], generation: 'pending', revision: journal.revision + 1 }
 }
 
-export async function composeJourneyJournal(journal, { signal, apiKey = '', request = fetch } = {}) {
+export async function composeJourneyJournal(journal, { signal, apiKey = '', request = fetch, language = 'zh' } = {}) {
   // Send the complete ASR record, including later corrections and additions.
   const response = await request('/api/journey/compose', {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
     signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(90000)]) : AbortSignal.timeout(90000),
-    body: JSON.stringify({ transcript: journal.originalText, topic: journal.topicId }),
+    body: JSON.stringify({ transcript: journal.originalText, topic: journal.topicId, language }),
   })
   const data = await response.json()
   if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : data.detail?.message || '回信暂时无法生成，完整讲述已保留。')

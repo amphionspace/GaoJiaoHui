@@ -38,7 +38,7 @@ const voices = ref([])
 const voiceSel = ref('')
 const voicesNote = ref('')
 const ttsModel = ref('')                   // ''=省略 model → 网关默认后端（cn-test 迁移期短名均 404）
-const probeText = ref('给今天的自己留一句话，慢慢来，也可以继续向前。')
+const probeText = ref(store.locale === 'en' ? 'Leave a line for yourself today. Take your time, and keep moving forward.' : '给今天的自己留一句话，慢慢来，也可以继续向前。')
 const probeSt = ref('')
 
 let recMic = null, recTimer = null, recStart = 0, refBlob = null

@@ -4,7 +4,7 @@
    B: 合成后端可选 —— qwen-tts-1.7b（本地 vLLM，model 名直通路由，~1s）/ seed-iclv2（火山） */
 import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { api } from '../core/api.js'
-import { log } from '../core/store.js'
+import { store, log } from '../core/store.js'
 import { SR, Mic, fileToPCM, wavEncode } from '../core/audio.js'
 import WaveCanvas from './WaveCanvas.vue'
 
@@ -22,7 +22,7 @@ const voices = ref([])
 const voiceSel = ref('')
 const voicesNote = ref('')
 const ttsModel = ref('qwen-tts-1.7b')
-const ttsText = ref('本地网页克隆合成验证，成功。')
+const ttsText = ref(store.locale === 'en' ? 'A local cloned-voice synthesis check.' : '本地网页克隆合成验证，成功。')
 const ttsSt = ref('')
 const player = ref(null)
 

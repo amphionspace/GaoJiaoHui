@@ -1,9 +1,10 @@
 <script setup>
+import { store } from '../core/store.js'
 defineProps({ journal: { type: Object, required: true } })
 </script>
 
 <template>
-  <article class="journey-receipt" aria-label="和 2036 对话纪念便签">
+  <article class="journey-receipt" :aria-label="store.locale === 'en' ? 'Conversation with 2036 keepsake' : '和 2036 对话纪念便签'">
     <header class="receipt-masthead">
       <div class="receipt-kicker"><span>高交会 · 安菲翁科技</span><span>私人珍藏版</span></div>
       <strong>和 2036 对话</strong>
@@ -15,7 +16,7 @@ defineProps({ journal: { type: Object, required: true } })
       <h3>{{ journal.title }}</h3>
       <p class="receipt-summary">{{ journal.summary || journal.sourceText }}</p>
     </section>
-    <figure v-if="journal.sketch" class="receipt-sketch"><img :src="journal.sketch" :alt="`未来想象的简笔画：${journal.summary}`" width="1024" height="768" /></figure>
+    <figure v-if="journal.sketch" class="receipt-sketch"><img :src="journal.sketch" :alt="store.locale === 'en' ? `A line drawing of the future: ${journal.summary}` : `未来想象的简笔画：${journal.summary}`" width="1024" height="768" /></figure>
     <div v-if="journal.keywords.length" class="receipt-index">
       <span class="receipt-index-label">这通电话<br />关于</span>
       <p><span v-for="(word, index) in journal.keywords" :key="word"><i>{{ String(index + 1).padStart(2, '0') }}</i>{{ word }}</span></p>

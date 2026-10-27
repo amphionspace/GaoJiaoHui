@@ -1,22 +1,29 @@
 <script setup>
 import { computed, onMounted, onBeforeUnmount, ref } from 'vue'
 import { ArrowLeft, Copy, Check, Maximize2 } from '@lucide/vue'
+import { store } from '../core/store.js'
+import { toggleLocale } from '../core/i18n.js'
 
 const viewport = ref(null), shell = ref(null), scale = ref(.15), copied = ref(false)
-const source = new URL(window.location.href)
-source.searchParams.delete('view')
-source.searchParams.set('display', 'kiosk')
+const source = computed(() => {
+  const url = new URL(window.location.href)
+  url.searchParams.delete('view')
+  url.searchParams.set('display', 'kiosk')
+  url.searchParams.set('lang', store.locale)
+  return url.href
+})
 const frameStyle = computed(() => ({ width: `${2160 * scale.value}px`, height: `${3840 * scale.value}px` }))
 let observer, copyTimer
 async function copyLink() {
   try {
-    await navigator.clipboard.writeText(window.location.href)
+    await navigator.clipboard.writeText(source.value)
     copied.value = true
     clearTimeout(copyTimer)
     copyTimer = setTimeout(() => { copied.value = false }, 2500)
   } catch { copied.value = false }
 }
 function fullscreen() { shell.value?.requestFullscreen?.().catch(() => {}) }
+function changeLanguage() { toggleLocale() }
 onMounted(() => {
   observer = new ResizeObserver(([entry]) => {
     scale.value = Math.max(.01, Math.min(entry.contentRect.width / 2160, entry.contentRect.height / 3840))
@@ -31,13 +38,14 @@ onBeforeUnmount(() => { observer?.disconnect(); clearTimeout(copyTimer) })
     <div class="portrait-toolbar">
       <a href="/" aria-label="返回普通页面" title="返回普通页面"><ArrowLeft :size="20" /></a>
       <span>和 2036 对话 <small>竖屏体验</small></span>
+      <button title="切换语言" aria-label="切换语言" @click="changeLanguage">{{ store.locale === 'en' ? '中' : 'EN' }}</button>
       <button :title="copied ? '链接已复制' : '复制体验链接'" :aria-label="copied ? '链接已复制' : '复制体验链接'" @click="copyLink"><Check v-if="copied" :size="20" /><Copy v-else :size="20" /></button>
       <button title="全屏体验" aria-label="全屏体验" @click="fullscreen"><Maximize2 :size="20" /></button>
       <span class="portrait-copy-status" role="status">{{ copied ? '链接已复制' : '' }}</span>
     </div>
     <div ref="viewport" class="portrait-viewport">
       <div class="portrait-screen" :style="frameStyle">
-        <iframe title="和 2036 对话竖屏体验" :src="source.href" allow="microphone; autoplay; fullscreen" :style="{ transform: `scale(${scale})` }" />
+        <iframe title="和 2036 对话竖屏体验" :src="source" allow="microphone; autoplay; fullscreen" :style="{ transform: `scale(${scale})` }" />
       </div>
     </div>
   </div>

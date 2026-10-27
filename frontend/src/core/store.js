@@ -1,9 +1,13 @@
 /* 全局状态：API Key / 演示模式 / 事件日志总线（模块级 reactive，无需 Pinia） */
 import { reactive } from 'vue'
 
+const queryLocale = new URLSearchParams(window.location.search).get('lang')
+const savedLocale = localStorage.getItem('amphion_locale')
+
 /* API Key 不随代码分发：首次使用请在页面「API 设置」中输入（保存于浏览器 localStorage） */
 export const store = reactive({
   apiKey: localStorage.getItem('amphion_key') || '',
+  locale: queryLocale === 'en' || queryLocale === 'zh' ? queryLocale : savedLocale === 'en' ? 'en' : 'zh',
   demoMode: true,
   logs: []           // { time, msg, cls }
 })

@@ -159,7 +159,7 @@ async function finishStory() {
     const content = (endingIntent(fullTranscript)?.text ?? fullTranscript).trim()
     if (!content) throw new Error('暂时没有识别到文字。可以重试录音，或改用文字留下这段讲述。')
     text.value = content
-    journal.value = createJourneyJournal(fullTranscript, topicId.value)
+    journal.value = createJourneyJournal(fullTranscript, topicId.value, new Date(), store.locale || 'zh')
     finishing = false
     await composeNote()
   } catch (e) { if (id === session) { stopRecording(); error.value = e.message; stage.value = 'listening'; finishing = false } }
@@ -170,7 +170,7 @@ async function composeNote() {
   const controller = textRequest = new AbortController(), id = session, draft = journal.value
   stage.value = 'generating'; error.value = notice.value = imageIssue.value = ''; busyLabel.value = '正在整理你对 2036 的期待'
   try {
-    const result = await composeJourneyJournal(draft, { signal: controller.signal, apiKey: store.apiKey })
+    const result = await composeJourneyJournal(draft, { signal: controller.signal, apiKey: store.apiKey, language: store.locale })
     if (id !== session || textRequest !== controller || journal.value?.revision !== draft.revision) return
     journal.value = result
     busyLabel.value = '正在把你的想象画进手记'
@@ -307,7 +307,7 @@ onBeforeUnmount(() => {
     <template v-if="onHome">
       <div class="journey-home-content">
         <p class="journey-eyebrow" lang="en">Hello, 2036.</p>
-        <h1><span>和 <b>2036</b></span><span>对话</span></h1>
+        <h1><template v-if="store.locale === 'en'"><span>Talk to <b>2036</b></span><span>today</span></template><template v-else><span>和 <b>2036</b></span><span>对话</span></template></h1>
         <JourneyCollage />
         <p class="journey-tagline">十年后的世界，你想怎样生活？</p>
         <div class="journey-home-actions"><button class="journey-primary call-start" @click="beginJourney"><JourneyIcon name="Phone" />开始通话<JourneyIcon name="ArrowRight" /></button></div>

@@ -40,6 +40,7 @@ HOST=127.0.0.1 PORT=8766 .venv/bin/python -m server.main
 - 百炼 TTS 使用根目录 `.env.bailian.json`，保存业务空间、北京地域地址和服务端 API Key，文件被 Git 忽略且应为权限 600。当前适配 `qwen-voice-enrollment` 创建临时音色，再用同一 `qwen3.5-omni-plus` 模型流式合成本人声音；密钥不会下发到浏览器。
 - `JOURNEY_TTS_PROVIDER=bailian` 启用百炼适配器，`JOURNEY_TTS_PROVIDER=legacy` 使用原有 `/v1/audio/voices` 网关协议。提供方只影响未来手记 TTS，不改变 ASR 与文本接口。
 - 语音 HTTP/WS 地址见 [运行配置示例](deploy/runtime.env.example)。前端启动时读取 `/api/config`，不需要为换网关重新构建。
+- Demo1 支持全界面英文体验：打开 `?lang=en`，或在页面右上角切换 `EN / 中`。竖屏英文地址为 `?view=portrait&lang=en`。
 - `JOURNEY_TTS_URL` 指向兼容当前临时音色协议的服务；**不能直接填任意商业厂商 URL**，注册、合成和认证协议需要适配。
 - `/api/journey/compose` 与百炼声音接口必须携带有效 `X-API-Key`，通过网关临时令牌接口校验。可设置服务端 `JOURNEY_ACCESS_KEY` 改为固定访问密钥校验；ASR 仍要求有效的网关密钥。
 

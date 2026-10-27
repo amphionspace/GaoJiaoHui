@@ -42,6 +42,29 @@ class JourneyTextTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("api_key", result)
         self.assertNotIn("anchors", result)
 
+    async def test_english_request_selects_english_prompt_and_accepts_longer_keywords(self):
+        calls = []
+        note = {
+            "summary": "I hope future technology can help my father carry things more easily.",
+            "message": "You saw your father's tired hands.",
+            "keywords": ["father", "robot", "future care"],
+            "takeaway": "You saw your father's tired hands.",
+            "anchors": ["爸爸搬东西很吃力"],
+        }
+
+        def handler(request):
+            calls.append(json.loads(request.content))
+            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(note)}}]})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        with patch.object(journey_text, "configuration", return_value=CONFIG), patch.object(journey_text.httpx, "AsyncClient", return_value=client):
+            result = await journey_text.compose(journey_text.ComposeRequest(transcript=RAW, topic="product", language="en"))
+        source = json.loads(calls[0]["messages"][1]["content"])
+        self.assertEqual(source["transcript"], RAW)
+        self.assertEqual(source["topic"], journey_text.TOPICS_EN["product"])
+        self.assertIn("Write all user-facing fields in English", calls[1]["messages"][-1]["content"])
+        self.assertEqual(result["message"], note["message"])
+
     async def test_bad_output_retries_once_and_never_returns_a_template(self):
         calls = []
 
