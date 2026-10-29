@@ -60,4 +60,4 @@
 }
 @media(orientation:portrait) and (min-width:1800px){#app .journey-appbar{padding-top:20px;padding-bottom:20px}}
 @media(prefers-reduced-motion:reduce){.journey *{animation:none!important;transition:none!important}}
-@media print{@page{size:auto;margin:5mm}body>*{display:none!important}body>#journey-print-root{display:block!important}html,body{background:white!important;margin:0!important;padding:0!important}}
+@media print{@page{size:4in 6in;margin:0}body>*{display:none!important}body>#journey-print-root{display:flex!important;align-items:center;justify-content:center;width:4in;height:6in;overflow:hidden;break-after:avoid}html,body{width:4in;height:6in;background:white!important;margin:0!important;padding:0!important;overflow:hidden}}

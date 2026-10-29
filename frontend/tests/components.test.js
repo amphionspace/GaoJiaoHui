@@ -20,7 +20,10 @@ async function mount(name, options = {}) {
   class Recorder {
     constructor(key, handlers) { this.handlers = handlers; recorders.push(this) }
     async start() { if (options.recorderStart) await options.recorderStart.promise }
-    async finish() { if (options.recorderFinal) this.handlers.onText(options.recorderFinal) }
+    async finish() {
+      if (options.recorderFinishing) await options.recorderFinishing.promise
+      if (options.recorderFinal) this.handlers.onText(options.recorderFinal)
+    }
     stop() { this.stopped = true }
   }
   class Mic {
@@ -74,6 +77,7 @@ async function mount(name, options = {}) {
     else if (specifier.endsWith('/speechQueue.js')) values = queues
     else if (specifier.endsWith('/journey.js')) values = { ...journey, composeJourneyJournal: options.compose || journey.composeJourneyJournal,
       illustrateJourneyJournal: options.illustrate || (async () => ({ sketch: 'data:image/png;base64,dGVzdA==', imageModel: 'test' })) }
+    else if (specifier.endsWith('/i18n.js')) values = { toggleLocale() { store.locale = store.locale === 'en' ? 'zh' : 'en' } }
     else if (specifier.endsWith('/api.js')) values = { WS_HOST: 'wss://test.invalid', boundedFetch: fetch }
     else if (specifier.endsWith('/store.js')) values = { store, setApiKey: k => { store.apiKey = k }, log() {}, dlog() {} }
     else if (specifier.endsWith('/audio.js')) values = { Mic, SR: 16000, wavEncode: () => new Blob(['wav']), fileToPCM: async () => new Int16Array(80000) }
@@ -164,6 +168,7 @@ test('silence after speech completes the story, while resuming speech cancels th
   })
   state.voiceEnabled = false
   await state.beginJourney()
+  await state.startListening()
   const { handlers } = recorders[0]
   handlers.onActivity(20, false)
   assert.equal(state.stage, 'listening')
@@ -184,6 +189,7 @@ test('silence after speech completes the story, while resuming speech cancels th
 test('journey replaces a rejected reference when the user records again', async () => {
   const { state, voices, app } = await mount('BoothJourney')
   const first = new Blob(['first']), next = new Blob(['new sample'])
+  state.voiceEnabled = true
   await state.prepareVoice(first)
   assert.equal(state.voiceState, 'failed')
   await state.prepareVoice(next)
@@ -193,22 +199,24 @@ test('journey replaces a rejected reference when the user records again', async 
   app.unmount()
 })
 
-test('journey waits for Start, finishes its introduction, then opens recording', async () => {
-  const intro = deferred()
+test('guide stays visible after the reveal and only opens recording on explicit Start', async () => {
   const recorderStart = deferred()
-  const { state, recorders, app } = await mount('BoothJourney', { recorderStart, intro })
+  const { state, recorders, app } = await mount('BoothJourney', { recorderStart })
   await tick()
   assert.equal(state.stage, 'welcome')
   assert.equal(recorders.length, 0)
   const starting = state.beginJourney()
   assert.equal(state.stage, 'intro')
   assert.equal(recorders.length, 0)
-  intro.resolve(true); await tick()
+  await starting
+  assert.equal(state.stage, 'intro')
+  assert.equal(recorders.length, 0)
+  const listening = state.startListening()
   assert.equal(state.stage, 'listening')
   assert.equal(state.connecting, true)
   assert.equal(recorders.length, 1)
   recorderStart.resolve()
-  await starting
+  await listening
   assert.equal(state.recording, true)
   recorders[0].handlers.onAudio()
   assert.equal(state.audioCaptured, true)
@@ -220,40 +228,52 @@ test('journey waits for Start, finishes its introduction, then opens recording',
 })
 
 test('skipping introduction opens exactly one recorder; late audio completion cannot restart it', async () => {
-  const intro = deferred()
-  const { state, recorders, app } = await mount('BoothJourney', { intro })
+  const { state, recorders, app } = await mount('BoothJourney')
   const starting = state.beginJourney()
   await state.startListening()
   assert.equal(recorders.length, 1)
-  intro.resolve(true); await starting
+  await starting
   assert.equal(recorders.length, 1)
   app.unmount()
 })
 
+test('skipping the guide reveals it without starting the microphone', async () => {
+  const { state, recorders, app } = await mount('BoothJourney')
+  const starting = state.beginJourney()
+  state.skipGuide()
+  assert.equal(state.stage, 'intro')
+  assert.equal(state.guideSkipped, true)
+  assert.equal(state.introPlaying, false)
+  assert.equal(recorders.length, 0)
+  await starting
+  assert.equal(state.stage, 'intro')
+  assert.equal(recorders.length, 0)
+  app.unmount()
+})
+
 test('leaving during introduction never opens the microphone later', async () => {
-  const intro = deferred()
-  const { state, recorders, active, app } = await mount('BoothJourney', { intro })
+  const { state, recorders, active, app } = await mount('BoothJourney')
   const starting = state.beginJourney()
   active.value = false; await Vue.nextTick()
-  intro.resolve(true); await starting
+  await starting
   assert.equal(recorders.length, 0)
   assert.equal(state.introPlaying, false)
   app.unmount()
 })
 
-test('all four story chapters finish before recording; no old chapter continues after skip', async () => {
+test('guide completes quietly and a visitor may switch to text', async () => {
   const { state, sounds, recorders, app } = await mount('BoothJourney')
   await state.beginJourney()
-  assert.equal(sounds[0].plays, 4)
-  assert.equal(state.introChapter, 3)
+  await state.startListening()
+  assert.equal(sounds[0].plays, 0)
+  assert.equal(state.introChapter, 2)
   assert.equal(recorders.length, 1)
   app.unmount()
-  const intro = deferred()
-  const skipped = await mount('BoothJourney', { intro })
+  const skipped = await mount('BoothJourney')
   const starting = skipped.state.beginJourney()
   skipped.state.useText()
-  intro.resolve(true); await starting
-  assert.equal(skipped.sounds[0].plays, 1)
+  await starting
+  assert.equal(skipped.sounds[0].plays, 0)
   assert.equal(skipped.state.textMode, true)
   skipped.app.unmount()
 })
@@ -292,13 +312,12 @@ test('image failure preserves text and retries only the image, without regenerat
   app.unmount()
 })
 
-test('failed introduction offers recovery without silently opening the microphone', async () => {
-  const { state, recorders, app } = await mount('BoothJourney', { introError: true })
+test('explicit start after the quiet guide opens the microphone without narration', async () => {
+  const { state, sounds, recorders, app } = await mount('BoothJourney')
   await state.beginJourney()
-  assert.equal(state.stage, 'intro')
-  assert.ok(state.error.includes('播放'))
-  assert.equal(recorders.length, 0)
   await state.startListening()
+  assert.equal(state.stage, 'listening')
+  assert.equal(sounds[0].plays, 0)
   assert.equal(recorders.length, 1)
   app.unmount()
 })
@@ -311,6 +330,7 @@ test('text fallback opens the editor and late ASR events cannot overwrite it', a
   assert.equal(recorders.length, 0)
   state.reset()
   await state.beginJourney()
+  await state.startListening()
   recorders[0].handlers.onText('已识别的第一句话')
   state.useText()
   recorders[0].handlers.onText('迟到的识别')
@@ -328,6 +348,7 @@ test('finishing records the last ASR correction and advances to the generated no
   state.voiceEnabled = false
   await Vue.nextTick()
   await state.beginJourney()
+  await state.startListening()
   recorders[0].handlers.onAudio()
   assert.equal(state.text, '')
   await state.finishStory()
@@ -352,6 +373,7 @@ test('the cloned voice reads the complete short reply automatically and leaves t
     voiceAudio: new Blob(['test audio']),
     compose: async draft => ({ ...draft, summary: '我想让聊天接得更自然。', messageToSelf: message, generation: 'model' }),
   })
+  state.voiceEnabled = true
   await state.prepareVoice(new Blob(['test reference']))
   state.journal = journey.createJourneyJournal('我想试全双工，让聊天更自然。', 'future')
   await state.composeNote()
@@ -370,6 +392,7 @@ test('reply generation and playback failures never open a result-page recorder',
       introError: true,
     })
     state.journal = { ...journey.createJourneyJournal('我想让爸爸搬东西省力一些。', 'future'), messageToSelf: '想让爸爸搬东西省些力，这份惦记值得留下。' }
+    state.voiceEnabled = true
     if (failure === 'compose') await state.composeNote()
     else if (failure === 'voice') await state.makeAudio(true)
     else { state.audioUrl = 'blob:test-only'; await state.replay() }
@@ -396,12 +419,36 @@ test('long speech is split without dropping characters; cancelled queues stay ca
   assert.deepEqual(seen, ['new'])
 })
 
-test('backgrounding the journey during ASR finalization leaves a recoverable screen', async () => {
-  const { state, document, app } = await mount('BoothJourney')
-  state.stage = 'generating'; state.text = '已经说出的内容'
+test('backgrounding during ASR finalization preserves the last Turn and waits for Termination', async () => {
+  const finalization = deferred(), composed = []
+  const final = '我希望和爸妈一起去看海。'
+  const { state, document, recorders, app } = await mount('BoothJourney', {
+    recorderFinishing: finalization,
+    compose: async draft => {
+      composed.push(draft.originalText)
+      return { ...draft, summary: draft.originalText, messageToSelf: '一起去看海。', generation: 'model' }
+    },
+  })
+  state.stage = 'listening'
+  await state.listen()
+  recorders[0].handlers.onText('我希望和爸妈')
+  const task = state.finishStory()
+  await tick()
   document.hidden = true; document.dispatchEvent(new Event('visibilitychange'))
-  assert.equal(state.stage, 'listening')
-  assert.equal(state.text, '已经说出的内容')
+  assert.equal(state.stage, 'generating')
+  assert.equal(state.recording, false)
+  assert.notEqual(recorders[0].stopped, true)
+  assert.match(state.notice, /正在收好最后一句话/)
+  recorders[0].handlers.onText(final)
+  assert.equal(state.text, final)
+  assert.equal(composed.length, 0)
+  finalization.resolve()
+  await task
+  assert.deepEqual(composed, [final])
+  assert.equal(state.journal.originalText, final)
+  assert.ok(state.journal.sketch)
+  assert.equal(state.stage, 'preview')
+  assert.equal(recorders[0].stopped, true)
   app.unmount()
 })
 
@@ -409,7 +456,7 @@ test('closing print preview does not claim paper was delivered or reopen the mic
   const { state, window, recorders, app } = await mount('BoothJourney')
   let prints = 0
   window.print = () => { prints++ }
-  state.journal = journey.createJourneyJournal('这是要留给未来的内容', 'story')
+  state.journal = { ...journey.createJourneyJournal('这是要留给未来的内容', 'story'), summary: '这是要留给未来的内容。' }
   await state.printJournal()
   assert.equal(prints, 1)
   assert.equal(state.stage, 'printing')
@@ -419,5 +466,107 @@ test('closing print preview does not claim paper was delivered or reopen the mic
   state.backToPreview()
   assert.equal(state.stage, 'preview')
   assert.equal(recorders.length, 0)
+  app.unmount()
+})
+
+
+test('light call UI derives states from real recorder events and leaves cloning off by default', async () => {
+  const { state, app, recorders } = await mount('BoothJourney')
+  assert.equal(state.voiceEnabled, false)
+  state.stage = 'listening'
+  await state.listen()
+  assert.equal(state.callState, 'listening')
+  assert.equal(recorders[0].handlers.onSample, undefined)
+  recorders[0].handlers.onText('我想去看雪山。和家人慢慢走。')
+  assert.equal(state.latestLine, '和家人慢慢走。')
+  recorders[0].handlers.onLevel(.4, true)
+  assert.equal(state.level, .4)
+  state.useText()
+  assert.equal(state.callState, 'typing')
+  assert.equal(recorders[0].stopped, true)
+  assert.ok(state.text.includes('雪山'))
+  state.stage = 'generating'
+  assert.equal(state.callState, 'processing')
+  state.error = '连接失败'
+  assert.equal(state.callState, 'error')
+  state.reset()
+  assert.equal(state.text, '')
+  app.unmount()
+})
+
+test('hiding the page stops capture but lets the pending illustration finish', async () => {
+  const pending = deferred()
+  const { state, document, app } = await mount('BoothJourney', {
+    compose: async draft => ({ ...draft, summary: '和家人去看雪山。', messageToSelf: '一起慢慢走。' }),
+    illustrate: () => pending.promise,
+  })
+  state.journal = journey.createJourneyJournal('和家人去看雪山。', 'future')
+  const task = state.composeNote(); await tick()
+  document.hidden = true
+  document.dispatchEvent(new Event('visibilitychange'))
+  assert.equal(state.stage, 'generating')
+  assert.equal(state.recording, false)
+  pending.resolve({ sketch: 'completed-in-background' })
+  await task
+  assert.equal(state.stage, 'preview')
+  assert.equal(state.journal.sketch, 'completed-in-background')
+  app.unmount()
+})
+
+test('full transcript follows new speech until the visitor scrolls up, then can return to latest', async () => {
+  const { state, app, recorders } = await mount('BoothJourney')
+  state.stage = 'listening'
+  await state.listen()
+  state.transcriptViewport = { scrollHeight: 900, scrollTop: 0, clientHeight: 200 }
+  recorders[0].handlers.onText('第一句。\n第二句。\n最后一句。')
+  await tick()
+  assert.equal(state.text, '第一句。\n第二句。\n最后一句。')
+  assert.equal(state.transcriptViewport.scrollTop, 900)
+  state.transcriptViewport.scrollTop = 100
+  state.trackTranscriptScroll()
+  assert.equal(state.followTranscript, false)
+  recorders[0].handlers.onText('第一句。\n第二句。\n最后一句已修正。')
+  await tick()
+  assert.equal(state.transcriptViewport.scrollTop, 100)
+  assert.equal(state.text, '第一句。\n第二句。\n最后一句已修正。')
+  await state.showLatestTranscript()
+  assert.equal(state.followTranscript, true)
+  assert.equal(state.transcriptViewport.scrollTop, 900)
+  app.unmount()
+})
+
+test('pending microphone connection can switch to text without a late ready event starting capture', async () => {
+  const permission = deferred()
+  const { state, recorders, app } = await mount('BoothJourney', { recorderStart: permission })
+  state.stage = 'listening'
+  const start = state.listen()
+  assert.equal(state.connecting, true)
+  state.useText()
+  assert.equal(state.connecting, false)
+  permission.resolve()
+  await start
+  assert.equal(state.textMode, true)
+  assert.equal(state.recording, false)
+  assert.equal(recorders[0].stopped, true)
+  app.unmount()
+})
+
+test('failed reply preserves the complete story, cannot print a blank note, and can return home', async () => {
+  const { state, app, window } = await mount('BoothJourney', {
+    compose: async () => { throw new DOMException('timeout', 'TimeoutError') },
+  })
+  const original = '我希望十年后能和家人一起住在海边。'
+  state.journal = journey.createJourneyJournal(original, 'future')
+  await state.composeNote()
+  assert.equal(state.stage, 'preview')
+  assert.equal(state.journal.originalText, original)
+  let prints = 0
+  window.print = () => { prints++ }
+  await state.printJournal()
+  assert.equal(prints, 0)
+  state.reset()
+  assert.equal(state.stage, 'welcome')
+  assert.equal(state.journal, null)
+  assert.equal(state.error, '')
   app.unmount()
 })

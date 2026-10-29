@@ -11,7 +11,7 @@ from server.evaluate_journey import CASES, check_note
 
 RAW = "嗯，我今天看到了机器人。一开始只觉得新奇。后来想到爸爸搬东西很吃力，我想弄清它能不能帮上忙。"
 NOTE = {
-    "summary": "我想了解展会上的机器人能不能替爸爸搬重物，让他轻松一点。",
+    "summary": "我想了解展会上的机器人能不能替爸爸搬重物。希望它真的能让爸爸轻松一点。",
     "message": "你想带回家的，是爸爸不用再费劲的日子。这份惦记，比机器人本身更动人。",
     "keywords": ["爸爸", "机器人", "搬重物"],
     "takeaway": "你想带回家的，是爸爸不用再费劲的日子。",
@@ -38,6 +38,7 @@ class JourneyTextTests(unittest.IsolatedAsyncioTestCase):
 
         result = await self.invoke(handler)
         self.assertEqual(result["summary"], NOTE["summary"])
+        self.assertEqual(result["note_text"], NOTE["summary"])
         self.assertEqual(result["message"], NOTE["message"])
         self.assertNotIn("api_key", result)
         self.assertNotIn("anchors", result)
@@ -45,7 +46,7 @@ class JourneyTextTests(unittest.IsolatedAsyncioTestCase):
     async def test_english_request_selects_english_prompt_and_accepts_longer_keywords(self):
         calls = []
         note = {
-            "summary": "I hope future technology can help my father carry things more easily.",
+            "summary": "I want a robot to help my father carry things. I need to know if it can.",
             "message": "You saw your father's tired hands.",
             "keywords": ["father", "robot", "future care"],
             "takeaway": "You saw your father's tired hands.",
@@ -64,6 +65,26 @@ class JourneyTextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(source["topic"], journey_text.TOPICS_EN["product"])
         self.assertIn("Write all user-facing fields in English", calls[1]["messages"][-1]["content"])
         self.assertEqual(result["message"], note["message"])
+
+    def test_note_text_is_the_personal_keepsake_body(self):
+        for note_text in (
+            "我想让机器人替爸爸搬重物。",
+            "我想了解展会上的机器人能不能替爸爸搬重物。希望它真的能让爸爸轻松一点。",
+            "我想让机器人替爸爸搬重物。希望它真的能让爸爸轻松一点。也许先试试再决定。",
+        ):
+            with self.subTest(note_text=note_text):
+                note = journey_text.parse_note(json.dumps({**NOTE, "note_text": note_text}, ensure_ascii=False), RAW)
+                self.assertEqual(note.note_text, note_text)
+        self.assertIn("note_text", journey_text.SYSTEM_PROMPT)
+        self.assertIn("40至70字", journey_text.SYSTEM_PROMPT)
+        self.assertIn("最多80字", journey_text.SYSTEM_PROMPT)
+        self.assertIn("优先收敛为两句", journey_text.SYSTEM_PROMPT)
+        self.assertIn("sketch_prompt", journey_text.SYSTEM_PROMPT)
+
+    def test_note_text_rejects_four_sentences(self):
+        payload = {**NOTE, "note_text": "第一句。第二句。第三句。第四句。"}
+        with self.assertRaisesRegex(ValueError, "1至3句"):
+            journey_text.parse_note(json.dumps(payload, ensure_ascii=False), RAW)
 
     async def test_bad_output_retries_once_and_never_returns_a_template(self):
         calls = []

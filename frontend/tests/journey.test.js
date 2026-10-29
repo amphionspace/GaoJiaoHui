@@ -86,11 +86,12 @@ test('generation uses the full raw transcript and keeps model summary separate f
   const result = await composeJourneyJournal(draft, { request: async (url, options) => {
     assert.equal(url, '/api/journey/compose')
     payload = JSON.parse(options.body)
-    return { ok: true, json: async () => ({ generation: 'model', summary: '我想知道机器人能否替爸爸搬重物。', message: '我是以后的你。你看到机器人的时候，想起的是爸爸搬重物的辛苦。', keywords: ['爸爸', '搬重物'], model: 'test-model' }) }
+    return { ok: true, json: async () => ({ generation: 'model', note_text: '我想知道机器人能否替爸爸搬重物。希望它真的能让爸爸轻松一点。', message: '我是以后的你。你看到机器人的时候，想起的是爸爸搬重物的辛苦。', keywords: ['爸爸', '搬重物'], model: 'test-model' }) }
   } })
   assert.equal(payload.transcript, raw)
   assert.equal(result.originalText, raw)
   assert.match(result.summary, /爸爸/)
+  assert.equal(result.noteText, result.summary)
   assert.notEqual(result.summary, result.messageToSelf)
   assert.equal(draft.messageToSelf, '')
   const renamed = editJourneyJournal(result, '标题改成想让爸爸轻松一点')

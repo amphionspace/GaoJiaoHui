@@ -17,6 +17,7 @@ export async function loadRuntimeConfig() {
     if (!['ws:', 'wss:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search) throw new Error('语音连接地址配置无效。')
   }
   WS_HOST = config.wsHost; WS_HOST_LEGACY = config.wsLegacy
+  store.asrManaged = config.asrManaged === true
 }
 
 export function boundedFetch(url, options = {}, timeout = 30000) {

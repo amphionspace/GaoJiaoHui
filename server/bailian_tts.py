@@ -118,8 +118,8 @@ async def _post_json(client: httpx.AsyncClient, url: str, config: dict[str, str]
 
 
 async def require_client_key(request: Request) -> str:
-    await security.access.authorize(request)
-    return request.headers['x-api-key'].strip()
+    identity = await security.access.authorize(request)
+    return identity if identity.startswith('managed:') else request.headers['x-api-key'].strip()
 
 
 async def list_voices(request: Request):

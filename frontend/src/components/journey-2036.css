@@ -30,3 +30,10 @@
   .journey-2036 .journey-listening .story-caption{margin-bottom:60px}.journey-2036 .journey-meteor-caption{font-size:54px}.journey-2036 .journey-generating{padding:90px 100px;gap:45px}
   .journey-2036 .journey-result{width:1440px;max-width:calc(100% - 240px);margin:100px auto 160px;gap:70px}.journey-2036 .journey-result .journey-primary{min-width:640px;min-height:160px;font-size:56px}.journey-2036 .journey-result .journey-notice{font-size:34px}.journey-2036 .journey-result .journey-actions{gap:35px}.journey-2036 .journey-play{width:130px;height:130px}
 }
+
+/* One continuous guide poster, sized to the supplied 941 × 1672 layout. */
+.journey-2036.journey-story-page{padding:0;background:#f4ebdf}
+.journey-2036.journey-story-page::before{display:none}
+.journey-2036.journey-story-page .journey-intro{width:min(941px,100%,calc((100dvh - 140px)*.5628));max-width:none;padding:0;margin:auto}
+.journey-story-page .journey-brand,.journey-story-page .journey-bottom{display:none}
+@media(orientation:portrait){.journey-2036.journey-story-page .journey-intro{width:min(100%,calc((100dvh - 160px)*.5628));margin:auto}}

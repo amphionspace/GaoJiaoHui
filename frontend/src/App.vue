@@ -48,7 +48,7 @@ onMounted(() => { health.value && health.value.checkHealth() })
       <button class="mini language-switch" type="button" @click="changeLanguage">{{ store.locale === 'en' ? '中' : 'EN' }}</button>
     </div>
   </header>
-  <div v-else class="journey-appbar"><span><JourneyIcon name="Phone" :size="18" />和 2036 对话 <small>demo1</small></span><div class="journey-appbar-actions"><button class="language-switch" type="button" @click="changeLanguage">{{ store.locale === 'en' ? '中' : 'EN' }}</button><a v-if="!kiosk" :href="`?view=portrait&lang=${store.locale}`" title="竖屏体验" aria-label="竖屏体验"><Smartphone :size="19" /></a><button title="连接设置" aria-label="连接设置" @click="openSettings"><JourneyIcon name="Settings2" :size="19" /></button></div></div>
+  <div v-else class="journey-appbar"><span><JourneyIcon name="Phone" :size="18" />和 2036 对话 <small>demo1</small></span><div class="journey-appbar-actions"><a v-if="!kiosk" :href="`?view=portrait&lang=${store.locale}`" title="竖屏体验" aria-label="竖屏体验"><Smartphone :size="19" /></a><button title="连接设置" aria-label="连接设置" @click="openSettings"><JourneyIcon name="Settings2" :size="19" /></button></div></div>
   <nav v-if="tab !== 0">
     <button v-for="(t, i) in TABS" :key="i" :class="{active: tab === i}" @click="tab = i">{{ t }}</button>
   </nav>
@@ -60,9 +60,10 @@ onMounted(() => { health.value && health.value.checkHealth() })
   </main>
   <dialog ref="settings" class="journey-settings">
     <form @submit.prevent="saveSettings"><div class="settings-heading"><h2>连接设置</h2><button type="button" aria-label="关闭设置" title="关闭设置" @click="settings.close()"><JourneyIcon name="X" /></button></div>
-      <label for="journey-api-key">语音网关密钥</label><input id="journey-api-key" type="password" v-model="keyInput" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+      <p v-if="store.asrManaged">语音识别已连接演示服务。浏览器使用一次性连接凭证。</p>
+      <template v-else><label for="journey-api-key">语音网关密钥</label><input id="journey-api-key" type="password" v-model="keyInput" placeholder="sk-..." autocomplete="off" spellcheck="false" /></template>
       <JourneyServiceStatus :api-key="keyInput" />
-      <button type="submit" class="act">保存设置</button>
+      <button v-if="!store.asrManaged" type="submit" class="act">保存设置</button><button v-else type="button" class="act" @click="settings.close()">完成</button>
     </form><details><summary>其他工作台</summary><div class="settings-modules"><button v-for="(t, i) in TABS.slice(1)" :key="t" @click="tab = i + 1; settings.close()">{{ t }}</button></div></details><details><summary>运行记录</summary><LogPanel /></details>
   </dialog>
   </template>

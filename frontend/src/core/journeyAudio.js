@@ -1,10 +1,12 @@
 import { Mic, SR, FRAME, b64frame, wavEncode } from './audio.js'
 import { WS_HOST, api } from './api.js'
 import { createSpeechDetector } from './journeySpeech.js'
+import { store } from './store.js'
 
 export class JourneyRecorder {
   constructor(key, handlers = {}, { context = null } = {}) {
     this.key = key
+    this.managed = store.asrManaged === true
     this.handlers = handlers
     this.text = ''
     this.closed = false
@@ -18,10 +20,16 @@ export class JourneyRecorder {
     this.processing = Promise.resolve()
     this.queuedChunks = 0
     this.idleSeconds = 0
+    this.detectedSpeechSeconds = 0
     this.context = context
+    this.pendingPcm = new Int16Array(8000)
+    this.pendingSamples = 0
   }
 
   acceptSegment(message) {
+    // An ASR model may emit plausible text for silence. Never accept it until
+    // the local detector has actually observed speech in this recording.
+    if (this.closed || this.detectedSpeechSeconds < .16) return
     const final = message.type === 'transcription.final'
     const key = message.segment_id != null ? `segment:${message.segment_id}` : `turn:${this.segmentSequence}`
     const previous = this.segments.get(key)
@@ -71,7 +79,19 @@ export class JourneyRecorder {
     this.detector = await this.waitForStart(pending, '人声检测未能启动，请刷新页面重试，或改用文字记录。')
     if (this.closed) { await this.detector?.dispose(); this.detector = null; return }
     this.handlers.onPhase?.('connection')
-    const socket = this.socket = new WebSocket(`${WS_HOST}/asr/v1/target-dialogue?api_key=${encodeURIComponent(this.key)}`)
+    let socketUrl = `${WS_HOST}/asr/v1/target-dialogue?api_key=${encodeURIComponent(this.key)}`
+    if (this.managed) {
+      this.sessionController = new AbortController()
+      const session = await this.waitForStart(api('/asr-session', {
+        prefix: '/api/journey', method: 'POST', signal: this.sessionController.signal,
+      }), '语音授权超时，请重试或改用文字记录。')
+      if (this.closed) return
+      let parsed
+      try { parsed = new URL(session.url) } catch { throw new Error('语音连接地址无效，请检查服务配置。') }
+      if (parsed.protocol !== 'wss:' || parsed.username || parsed.password || parsed.hash) throw new Error('语音连接地址无效，请检查服务配置。')
+      socketUrl = session.url
+    }
+    const socket = this.socket = new WebSocket(socketUrl)
     await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => fail('语音连接超时，请重试。'), 12000)
       const fail = message => { clearTimeout(timeout); reject(new Error(message)) }
@@ -92,7 +112,17 @@ export class JourneyRecorder {
       let message
       try { message = JSON.parse(event.data) } catch { return }
       const type = message.type || ''
-      if (type === 'session.created') ready()
+      if (this.managed) {
+        if (type === 'Begin') ready()
+        else if (type === 'Turn' && message.turn_order != null) this.acceptSegment({
+          type: message.end_of_turn ? 'transcription.final' : 'transcription.partial',
+          segment_id: message.turn_order, text: message.transcript || '',
+        })
+        else if (type === 'Termination') {
+          if (this.resolveFinal) this.resolveFinal(this.text)
+          else this.fail('语音会话已结束，已记录的内容会保留，可以继续录音。')
+        } else if (type === 'Error') this.fail('语音识别服务暂时不可用。已显示的讲述会保留，可以重试或改用文字记录。')
+      } else if (type === 'session.created') ready()
       else if (type === 'transcription.partial' || type === 'transcription.final') this.acceptSegment(message)
       else if (type === 'session.done') this.resolveFinal?.(this.text)
       else if (type === 'error') this.fail('语音识别服务暂时不可用。已显示的讲述会保留，可以重试或改用文字记录。')
@@ -105,7 +135,7 @@ export class JourneyRecorder {
       }
       else if (!this.closed) this.fail('语音连接已断开，可以继续录音或输入文字。')
     }
-    socket.send(JSON.stringify({ type: 'session.update', session: {
+    if (!this.managed) socket.send(JSON.stringify({ type: 'session.update', session: {
       participants: [], filter: { mode: 'open' },
       audio: { format: 'pcm_s16le', sample_rate_hz: SR, channels: 1 },
       recognition: { mode: 'role_separation', response_speed: 'balanced' },
@@ -115,7 +145,6 @@ export class JourneyRecorder {
     try {
       await this.mic.start(pcm => {
         if (this.closed || socket.readyState !== WebSocket.OPEN) return
-        this.handlers.onAudio?.()
         if (++this.queuedChunks > 24) { this.fail('音频处理跟不上录音，请关闭其他占用较高的程序后重试。'); return }
         this.processing = this.processing.then(async () => {
           if (!this.closed) await this.detector.process(pcm, this.acceptAudio)
@@ -138,6 +167,10 @@ export class JourneyRecorder {
     for (const sample of pcm) total += sample * sample
     const rms = Math.sqrt(total / pcm.length) / 32768
     const seconds = pcm.length / SR
+    if (voiced) {
+      this.detectedSpeechSeconds += seconds
+      if (this.detectedSpeechSeconds >= .16) this.handlers.onAudio?.()
+    }
     this.handlers.onLevel?.(Math.min(1, rms * 10), speaking)
     if (speaking) { this.heardSpeech = true; this.idleSeconds = 0 }
     else this.idleSeconds += seconds
@@ -154,10 +187,28 @@ export class JourneyRecorder {
         this.samples = []; this.sampleSeconds = 0; this.voicedSeconds = 0
       }
     }
-    for (let i = 0; i < pcm.length; i += FRAME) {
+    if (this.managed) {
+      // FourHz accepts binary PCM. Accumulate at most 500 ms per message.
+      for (let offset = 0; offset < pcm.length;) {
+        const length = Math.min(this.pendingPcm.length - this.pendingSamples, pcm.length - offset)
+        this.pendingPcm.set(pcm.subarray(offset, offset + length), this.pendingSamples)
+        this.pendingSamples += length; offset += length
+        if (this.pendingSamples === this.pendingPcm.length) this.flushManagedAudio()
+      }
+    } else for (let i = 0; i < pcm.length; i += FRAME) {
       this.socket.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: b64frame(pcm.subarray(i, i + FRAME)) }))
       this.frames++
     }
+  }
+
+  flushManagedAudio() {
+    if (!this.pendingSamples || this.closed || this.socket?.readyState !== WebSocket.OPEN) return
+    const bytes = new Uint8Array(this.pendingSamples * 2)
+    const view = new DataView(bytes.buffer)
+    for (let index = 0; index < this.pendingSamples; index++) view.setInt16(index * 2, this.pendingPcm[index], true)
+    this.socket.send(bytes)
+    this.frames++
+    this.pendingSamples = 0
   }
 
   emitSample() {
@@ -175,6 +226,7 @@ export class JourneyRecorder {
     this.handlers.onLevel?.(0, false)
     this.processing = this.processing.then(async () => {
       if (!this.closed) await this.detector.flush(this.acceptAudio)
+      if (this.managed) this.flushManagedAudio()
       this.emitSample()
       if (this.failure) throw this.failure
     })
@@ -184,9 +236,9 @@ export class JourneyRecorder {
       this.finalTimer = setTimeout(() => {
         this.handlers.onWarning?.('识别收尾超时，已保留收到的内容，请核对最后一句。')
         done(this.text)
-      }, 10000)
+      }, this.managed ? 65000 : 10000)
       if (this.socket?.readyState === WebSocket.OPEN && this.frames) {
-        this.socket.send(JSON.stringify({ type: 'input_audio_buffer.commit', final: true }))
+        this.socket.send(JSON.stringify(this.managed ? { type: 'Terminate' } : { type: 'input_audio_buffer.commit', final: true }))
       } else done(this.text)
     })).then(text => {
       this.stop()
@@ -198,6 +250,7 @@ export class JourneyRecorder {
 
   stop() {
     this.closed = true
+    this.sessionController?.abort()
     this.rejectStart?.()
     this.rejectStart = null
     this.mic?.stop()
@@ -213,6 +266,7 @@ export class JourneyRecorder {
       this.socket.close()
     }
     this.samples = []
+    this.pendingSamples = 0
   }
 }
 
@@ -367,6 +421,7 @@ export function voiceFailureMessage(error) {
   }
   if (/Selected voice model backend .* is unavailable/i.test(message)) return `${step}：本人音色模型服务暂未运行，请工作人员恢复 TTS 服务后重试。`
   if (/CERTIFICATE_VERIFY_FAILED|certificate verify failed/i.test(message)) return `${step}：语音网关的证书连接失败，请工作人员检查代理配置。`
+  if ([401, 403].includes(error?.status) && /百炼/.test(message)) return `${step}：${message}。请检查百炼密钥的音色注册及语音合成权限。`
   if ([401, 403].includes(error?.status)) return `${step}：语音网关密钥无效或权限不足，请工作人员检查设置。`
   if (/timeout/i.test(error?.name) || /timed? ?out|超时/i.test(message)) return `${step}：语音服务响应超时，可以重试。`
   return `${step}：${message || '语音服务暂时不可用，请稍后重试。'}`

@@ -1,17 +1,19 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { store } from '../core/store.js'
+import { toggleLocale } from '../core/i18n.js'
 import { endingIntent, createJourneyJournal, composeJourneyJournal, illustrateJourneyJournal } from '../core/journey.js'
 import { JourneyRecorder, JourneySound, JourneyVoice, cleanJourneyVoices, voiceFailureMessage } from '../core/journeyAudio.js'
 import { warmSpeechDetector, releasePreparedDetector } from '../core/journeySpeech.js'
 import JourneyIcon from './JourneyIcon.vue'
 import JourneyReceipt from './JourneyReceipt.vue'
-import JourneyCollage from './JourneyCollage.vue'
+import JourneyOrb from './JourneyOrb.vue'
 import JourneyStory from './JourneyStory.vue'
 import JourneyMeteor from './JourneyMeteor.vue'
 import './journey.css'
 import './journey-editorial.css'
 import './journey-2036.css'
+import './journey-light.css'
 
 const props = defineProps({ active: { type: Boolean, default: true } })
 const emit = defineEmits(['settings'])
@@ -24,11 +26,55 @@ const error = ref(''), notice = ref(''), voiceIssue = ref('')
 const imageIssue = ref(''), imageBusy = ref(false)
 const transcriptWarning = ref('')
 const autoFinishSeconds = ref(0)
-const voiceEnabled = ref(true), voiceState = ref('waiting'), audioUrl = ref('')
+const voiceEnabled = ref(false), voiceState = ref('waiting'), audioUrl = ref('')
 const playing = ref(false), audioPaused = ref(false), textMode = ref(false)
 const printReturned = ref(false), busyLabel = ref('正在整理你的讲述')
 const onHome = computed(() => stage.value === 'welcome')
 const introPlaying = ref(false), introChapter = ref(0)
+const storyFrameDelay = 4200
+const guideReplay = ref(0)
+const guideSkipped = ref(false)
+const callState = computed(() => {
+  if (error.value) return 'error'
+  if (stage.value === 'generating') return 'processing'
+  if (playing.value && !audioPaused.value) return 'speaking'
+  if (connecting.value) return 'connecting'
+  if (textMode.value) return 'typing'
+  return recording.value ? 'listening' : 'paused'
+})
+const callLabel = computed(() => ({ error: '连接遇到一点问题', processing: busyLabel.value, speaking: '正在播放回信', connecting: connectionLabel.value, typing: '把想法写下来', listening: paused.value ? '我在听，慢慢说' : '正在倾听', paused: '麦克风已暂停' }[callState.value]))
+const latestLine = computed(() => text.value.trim().match(/[^。！？!?\n]+[。！？!?]?/g)?.slice(-1)[0] || '')
+const transcriptViewport = ref(null), followTranscript = ref(true)
+const generationSeconds = ref(0)
+let generationTimer
+
+function trackTranscriptScroll() {
+  const view = transcriptViewport.value
+  if (view) followTranscript.value = view.scrollHeight - view.scrollTop - view.clientHeight < 48
+}
+async function showLatestTranscript() {
+  followTranscript.value = true
+  await nextTick()
+  const view = transcriptViewport.value
+  if (view) view.scrollTop = view.scrollHeight
+}
+watch(text, async () => {
+  if (!followTranscript.value) return
+  await nextTick()
+  const view = transcriptViewport.value
+  if (view) view.scrollTop = view.scrollHeight
+})
+watch(transcriptViewport, view => {
+  if (view && followTranscript.value) view.scrollTop = view.scrollHeight
+}, { flush: 'post' })
+watch(stage, value => {
+  clearInterval(generationTimer)
+  if (value === 'generating') {
+    generationSeconds.value = 0
+    generationTimer = setInterval(() => { generationSeconds.value++ }, 1000)
+  }
+})
+
 let recorder = null, sound = null, voice = null, candidate = null, textRequest = null
 let session = 0, audioTask = 0, turn = 0, finishing = false, introRun = 0
 let doneTimer, maxTimer
@@ -49,6 +95,7 @@ function cancelSession() {
   releasePreparedDetector()
   introRun++; introPlaying.value = false
   session++; stopRecording(); stopPlayback(); releaseAudio()
+  if (textRequest && journal.value?.summary && !journal.value.sketch) imageIssue.value = '插画生成已中断，文字手记已保留。请点击重试插画。'
   textRequest?.abort(); textRequest = null
   imageBusy.value = false
   voice?.dispose(); voice = null; candidate = null; finishing = false; lastVoiceError = ''
@@ -57,28 +104,34 @@ function reset() {
   cancelSession(); stage.value = 'welcome'; topicId.value = 'future'; text.value = ''; journal.value = null
   error.value = notice.value = voiceIssue.value = imageIssue.value = ''; imageBusy.value = false
   transcriptWarning.value = ''
+  followTranscript.value = true
   voiceState.value = 'waiting'; paused.value = textMode.value = printReturned.value = false
 }
 async function beginJourney() {
-  if (!props.active || recording.value || connecting.value || textMode.value || introPlaying.value) return
+  if (!props.active || recording.value || connecting.value || textMode.value) return
   stopPlayback(); unlockAudio(); error.value = ''; notice.value = ''
   const id = session, run = ++introRun
-  stage.value = 'intro'; introPlaying.value = true
+  stage.value = 'intro'; introPlaying.value = true; guideSkipped.value = false; guideReplay.value++
   warmSpeechDetector().catch(() => {})
   try {
-    for (let chapter = 0; chapter < 4; chapter++) {
+    // Keep the story page quiet for now; the three visual comparisons carry the introduction.
+    for (let chapter = 0; chapter < 3; chapter++) {
       introChapter.value = chapter
-      const ended = await sound.play(`/journey/story-2036-${chapter}.wav`)
+      await new Promise(resolve => setTimeout(resolve, storyFrameDelay))
       if (id !== session || run !== introRun || !props.active) return
-      if (!ended) { introPlaying.value = false; return }
     }
     introPlaying.value = false
-    await startListening()
+    // Keep the complete comparison visible until the visitor chooses to speak.
   } catch {
     if (id !== session || run !== introRun) return
     introPlaying.value = false
     error.value = '接通引导暂时没有播放成功。可以重新听，或直接开始讲述。'
   }
+}
+function skipGuide() {
+  introRun++
+  introPlaying.value = false
+  guideSkipped.value = true
 }
 async function startListening() {
   if (!props.active || stage.value !== 'intro') return
@@ -90,8 +143,8 @@ async function listen() {
   unlockAudio()
   stopRecording()
   if (stage.value !== 'listening') return
-  if (!props.active || textMode.value || !store.apiKey.trim()) {
-    if (!store.apiKey.trim()) error.value = '语音服务还未连接，请打开设置填写网关密钥，或先用文字体验。'
+  if (!props.active || textMode.value || (!store.asrManaged && !store.apiKey.trim())) {
+    if (!store.asrManaged && !store.apiKey.trim()) error.value = '语音服务还未连接，请打开设置填写网关密钥，或先用文字体验。'
     return
   }
   const id = session, myTurn = turn, prefix = text.value.trim()
@@ -174,6 +227,7 @@ async function composeNote() {
     if (id !== session || textRequest !== controller || journal.value?.revision !== draft.revision) return
     journal.value = result
     busyLabel.value = '正在把你的想象画进手记'
+    imageBusy.value = true
     try {
       const illustration = await illustrateJourneyJournal(result, { signal: controller.signal, apiKey: store.apiKey })
       if (id !== session || textRequest !== controller || controller.signal.aborted) return
@@ -181,9 +235,15 @@ async function composeNote() {
     } catch (e) {
       if (id !== session || textRequest !== controller || controller.signal.aborted) return
       imageIssue.value = e.name === 'TimeoutError' ? '插画生成超时，文字手记已保留。' : e.message
+    } finally {
+      if (id === session && textRequest === controller) imageBusy.value = false
     }
     textRequest = null; stage.value = 'preview'
-    if (voiceEnabled.value && voice?.registration) await makeAudio(true)
+    if (voiceEnabled.value && voice?.registration) await makeAudio(!document.hidden)
+    else if (voiceEnabled.value && !textMode.value) {
+      voiceState.value = 'failed'
+      voiceIssue.value = '清晰人声不足5秒，本次未能创建本人音色。请重新通话，连续讲述约10秒。'
+    }
   } catch (e) {
     if (id !== session || textRequest !== controller || controller.signal.aborted) return
     textRequest = null; stage.value = 'preview'
@@ -249,7 +309,7 @@ async function togglePlayback() {
   else { try { await sound.resume(); audioPaused.value = false } catch { error.value = '播放未能继续，请重新播放。' } }
 }
 async function printJournal() {
-  if (!journal.value || stage.value === 'printing' || imageBusy.value) return
+  if (!journal.value?.summary || stage.value === 'printing' || imageBusy.value) return
   const id = session
   stopPlayback(); stopRecording(); stage.value = 'printing'; printReturned.value = false
   await nextTick()
@@ -276,9 +336,16 @@ watch(voiceEnabled, enabled => {
 })
 function pageHidden() {
   if (!document.hidden) return
-  cancelSession()
-  if (['intro', 'generating', 'playback', 'printing'].includes(stage.value)) stage.value = journal.value ? 'preview' : 'listening'
-  if (!onHome.value) notice.value = '讲述已保留，录音与播放已暂停。'
+  // Hiding a tab must stop capture/playback, but must not cancel a paid generation.
+  if (finishing) {
+    // finish() has already stopped the microphone; keep its socket and turn
+    // alive until the final transcript and termination have arrived.
+    recording.value = connecting.value = false; level.value = 0; autoFinishSeconds.value = 0
+  } else stopRecording()
+  stopPlayback()
+  if (stage.value === 'playback') stage.value = 'preview'
+  if (!onHome.value) notice.value = finishing ? '录音已停止，正在收好最后一句话，随后继续生成手记。'
+    : textRequest ? '录音已暂停，手记与插画仍在生成。' : '讲述已保留，录音与播放已暂停。'
 }
 onMounted(() => {
   sound = new JourneySound()
@@ -291,56 +358,81 @@ watch(() => store.apiKey, () => {
   else if (!onHome.value) stage.value = 'listening'
 })
 onBeforeUnmount(() => {
+  clearInterval(generationTimer)
   cancelSession(); sound?.dispose()
   window.removeEventListener('afterprint', afterPrint); window.removeEventListener('pagehide', cancelSession); document.removeEventListener('visibilitychange', pageHidden)
 })
 </script>
 
 <template>
-  <section class="journey journey-2036" :class="{ 'journey-home': onHome, 'journey-story-page': stage === 'intro', 'journey-receipt-page': ['preview', 'playback', 'printing'].includes(stage) }" aria-label="和 2036 对话" @pointerdown.capture="unlockAudio" @keydown.capture="unlockAudio">
-    <div class="journey-windowbar" aria-hidden="true"><span class="journey-window-dots"><i /><i /><i /></span><span>future.call / to myself</span><span class="journey-window-mark">↗</span></div>
-    <div v-if="onHome" class="journey-topline"><span>高交会 · 安菲翁科技</span><span>2026 → 2036</span></div>
-    <div v-if="!onHome" class="journey-brand"><span v-if="stage !== 'intro'">和 2036 对话</span><button class="journey-icon-button" title="结束通话" aria-label="结束通话" @click="reset"><JourneyIcon name="X" /></button></div>
-    <div v-if="error" class="journey-alert" role="alert"><span>{{ error }}</span><button v-if="!store.apiKey" class="journey-link" @click="emit('settings')">打开设置</button><button class="journey-icon-button" aria-label="关闭提示" title="关闭提示" @click="error = ''"><JourneyIcon name="X" :size="16" /></button></div>
+  <section class="journey journey-2036 journey-light" :class="{ 'journey-home': onHome, 'journey-story-page': stage === 'intro', 'journey-receipt-page': ['preview', 'playback', 'printing'].includes(stage) }" aria-label="和 2036 对话" @pointerdown.capture="unlockAudio" @keydown.capture="unlockAudio">
+    <header class="experience-header"><span class="experience-brand"><span class="brand-dot" />和 2036 对话</span><div class="experience-header-actions"><span class="experience-step">{{ onHome ? '一段关于未来的想象' : stage === 'intro' ? '01 / 回看十年' : stage === 'listening' ? '02 / 留下期待' : '03 / 给未来的信' }}</span><button type="button" class="experience-language" :aria-label="store.locale === 'en' ? 'Switch to Chinese' : 'Switch to English'" @click="toggleLocale">{{ store.locale === 'en' ? '中' : 'EN' }}</button></div></header>
+    <div v-if="error" class="journey-alert" role="alert"><span>{{ error }}</span><button v-if="!store.apiKey && !store.asrManaged" class="journey-link" @click="emit('settings')">打开设置</button><button class="journey-icon-button" aria-label="关闭提示" title="关闭提示" @click="error = ''"><JourneyIcon name="X" :size="16" /></button></div>
     <div v-if="voiceIssue && ['preview', 'playback'].includes(stage)" class="journey-alert" role="alert"><span>{{ voiceIssue }} 讲述与手记已保留。</span></div>
     <div v-if="transcriptWarning" class="journey-alert" role="alert">{{ transcriptWarning }}</div>
     <template v-if="onHome">
       <div class="journey-home-content">
-        <p class="journey-eyebrow" lang="en">Hello, 2036.</p>
-        <h1><template v-if="store.locale === 'en'"><span>Talk to <b>2036</b></span><span>today</span></template><template v-else><span>和 <b>2036</b></span><span>对话</span></template></h1>
-        <JourneyCollage />
-        <p class="journey-tagline">十年后的世界，你想怎样生活？</p>
-        <div class="journey-home-actions"><button class="journey-primary call-start" @click="beginJourney"><JourneyIcon name="Phone" />开始通话<JourneyIcon name="ArrowRight" /></button></div>
-        <label class="journey-consent"><input type="checkbox" v-model="voiceEnabled" />用我的声音，听见未来的回信</label>
+        <p class="journey-eyebrow">A LITTLE CLOSER TO TOMORROW</p>
+        <h1>和 2036 对话</h1>
+        <p class="welcome-description">把今天的一点期待，<br />说给十年后的世界。</p>
+        <JourneyOrb state="idle" />
+        <p class="journey-tagline">不用想好答案，从一个小小的愿望开始。</p>
+        <div class="journey-home-actions"><button class="journey-primary call-start" @click="beginJourney">开始体验<JourneyIcon name="ArrowRight" /></button></div>
+        <label class="journey-consent"><input type="checkbox" v-model="voiceEnabled" />用我的声音，听见未来的回信（可选）</label>
+        <p class="privacy-note">默认只转写讲述。勾选后才会尝试采集本人音色；<br />声音暂不可用时，仍可生成文字手记。</p>
       </div>
     </template>
     <div v-else-if="stage === 'intro'" class="journey-intro">
-      <JourneyStory :chapter="introChapter" />
-      <p class="story-caption">对 2036 的期待</p>
-      <div class="story-controls"><button v-if="!introPlaying" class="journey-icon-button" title="重新播放故事" aria-label="重新播放故事" @click="beginJourney"><JourneyIcon name="RotateCcw" /></button><button class="journey-icon-button" title="跳过故事，开始讲述" aria-label="跳过故事，开始讲述" @click="startListening"><JourneyIcon name="Mic" /></button><button class="journey-icon-button" title="用文字留下期待" aria-label="用文字留下期待" @click="useText"><JourneyIcon name="Pencil" /></button></div>
+      <div class="story-heading"><p>回看过去十年</p><h2>变化，曾经也是想象。</h2></div>
+      <JourneyStory :key="guideReplay" :reveal-all="guideSkipped" @skip="skipGuide" @start="startListening" @text="useText" @replay="beginJourney" />
+
     </div>
-    <div v-else-if="stage === 'listening'" class="journey-listening">
-      <p class="story-caption">对 2036 的期待</p><p class="journey-section-label" role="status"><span :class="['status-dot', { live: recording }]" />{{ textMode ? '写下你的期待' : connecting ? connectionLabel : recording ? paused ? '正在等待下一句话' : '可以开始说话了' : '讲述已暂停' }}</p><p v-if="connecting" class="journey-subtitle">{{ connectionHint }}</p>
-      <div v-if="!textMode" class="journey-wave large" aria-hidden="true"><i v-for="i in 23" :key="i" :style="{ height: `${6 + level * 50 * (.3 + Math.abs(Math.sin(i)) * .7)}px` }" /></div>
-      <label v-if="textMode" class="journey-text-entry"><span>你的讲述</span><textarea v-model="text" placeholder="2036 年，我希望……" rows="7" /></label>
-      <div v-else class="journey-transcript" role="log" aria-label="实时讲述" aria-live="polite"><span class="journey-section-label">{{ connecting ? '正在连接' : text ? '你的完整讲述' : audioCaptured ? '已收到声音，正在识别' : recording ? '等待你的声音' : '讲述已暂停' }}</span><p>{{ text || '你的第一句话，会出现在这里。' }}</p></div>
-      <p class="journey-notice" v-if="notice">{{ notice }}</p><div class="journey-actions"><button class="journey-primary" @click="finishStory" :disabled="!text.trim() && !audioCaptured"><JourneyIcon name="Check" />我说完了</button><button v-if="!recording && !connecting && !textMode" class="journey-secondary" @click="listen"><JourneyIcon name="Mic" />继续录音</button><button class="journey-link" @click="textMode ? (textMode = false, listen()) : useText()">{{ textMode ? '改用语音' : '改用文字' }}</button></div>
-      <p class="journey-small" role="status">{{ textMode ? '写完后，把今天留在手记里。' : autoFinishSeconds ? `${autoFinishSeconds} 秒后开始整理，继续说话可接着记录。` : paused ? '还想说些什么，我在听。' : '' }}</p><button class="journey-link muted" @click="reset"><JourneyIcon name="ArrowLeft" :size="15" />结束这次通话</button>
+    <div v-else-if="['listening', 'generating'].includes(stage)" class="call-room" :data-state="callState" :aria-busy="connecting || stage === 'generating'">
+      <div class="call-question" :inert="connecting"><p class="question-kicker">留一点想象给未来</p><h2>十年后的世界，<br />你希望怎样生活？</h2><p>可以是一件小事，也可以是一个大胆的念头。</p></div>
+      <div class="call-presence" :inert="connecting">
+        <div v-if="stage === 'generating'" class="generation-delivery"><JourneyMeteor /><p>一封穿越时空的信，正在飞向 2036</p></div>
+        <JourneyOrb v-else :state="callState" :level="level" />
+        <p class="call-status" role="status"><span />{{ callLabel }}</p>
+        <p class="call-hint">{{ connecting ? connectionHint : stage === 'generating' ? (generationSeconds >= 25 ? '还在认真整理，完整讲述已保留，请稍候。' : '你的讲述已收到，整理好后会呈现给你。') : textMode ? '随时可以改回语音，已写下的内容会保留。' : recording ? '说完后点下方按钮，或说“我说完了”。' : '你可以重新连接，也可以用文字继续。' }}</p>
+      </div>
+      <div class="call-content" :inert="connecting">
+        <label v-if="textMode && stage === 'listening'" class="call-text"><span>你的期待</span><textarea v-model="text" placeholder="2036 年，我希望……" rows="4" /></label>
+        <div v-else class="call-caption call-transcript">
+          <div class="transcript-heading"><span>你的完整讲述</span><small>可向上滚动查看</small></div>
+          <div ref="transcriptViewport" class="transcript-viewport" role="log" aria-label="完整讲述记录" aria-live="polite" aria-atomic="false" tabindex="0" @scroll="trackTranscriptScroll"><p>{{ text || (audioCaptured ? '已收到声音，正在识别…' : '第一句话，会从这里开始。') }}</p></div>
+          <button v-if="!followTranscript" class="transcript-latest journey-link" @click="showLatestTranscript"><JourneyIcon name="ChevronDown" :size="16" />回到最新一句</button>
+        </div>
+        <div v-if="journal?.messageToSelf && stage === 'generating'" class="call-pending-reply"><span>给你的回信</span><p>{{ journal.messageToSelf }}</p></div>
+      </div>
+      <footer class="call-dock" :inert="connecting">
+        <p class="dock-note" role="status">{{ notice || (autoFinishSeconds ? `${autoFinishSeconds} 秒后开始整理，继续说话可接着记录。` : stage === 'generating' ? '正在处理 · 麦克风已关闭' : '只记录你此刻想留下的话') }}</p>
+        <div class="call-main-actions"><button v-if="stage === 'listening'" class="journey-primary" @click="finishStory" :disabled="connecting || (!text.trim() && !audioCaptured)"><JourneyIcon name="Check" />我说完了</button><button v-else class="journey-primary" disabled>正在整理…</button><button v-if="stage === 'listening' && !recording && !connecting && !textMode" class="journey-secondary" @click="listen"><JourneyIcon name="Mic" />重新连接</button></div>
+        <div class="call-other-actions"><button v-if="stage === 'listening'" class="journey-link" @click="textMode ? (textMode = false, listen()) : useText()"><JourneyIcon :name="textMode ? 'Mic' : 'Pencil'" :size="17" />{{ textMode ? '改用语音' : '文字输入' }}</button><button v-if="stage === 'generating' && journal?.messageToSelf && !textRequest" class="journey-link" @click="skipAudio">先看手记</button><button class="journey-link" @click="reset"><JourneyIcon name="X" :size="17" />结束对话</button></div>
+      </footer>
+      <div v-if="connecting" class="mic-connection-overlay">
+        <div class="mic-connection-card" role="status" aria-live="polite">
+          <div class="mic-connection-pill"><i class="connection-spinner" />正在连接麦克风</div>
+          <p>{{ connectionHint }}</p><small>连接完成后，就可以开始说话。</small>
+          <div class="mic-connection-actions"><button class="journey-secondary" @click="useText">改用文字</button><button class="journey-link" @click="reset">返回首页</button></div>
+        </div>
+      </div>
     </div>
-    <div v-else-if="stage === 'generating'" class="journey-generating" aria-busy="true"><JourneyMeteor /><p class="journey-meteor-caption" role="status" :aria-label="`一封穿越时空的信，正在飞向 2036。${busyLabel}`">一封穿越时空的信，正在飞向 2036</p><button v-if="journal?.messageToSelf && !textRequest" class="journey-secondary" @click="skipAudio">先看手记<JourneyIcon name="ArrowRight" /></button><button class="journey-link muted" @click="reset">重新开始</button></div>
     <div v-else-if="['preview', 'playback', 'printing'].includes(stage) && journal" class="journey-result">
-      <div class="journey-paper-preview"><JourneyReceipt :journal="journal" /></div>
+      <div v-if="journal.messageToSelf" class="reply-card"><span>{{ playing && !audioPaused ? '正在播放回信' : '来自未来的一句话' }}</span><p>{{ journal.messageToSelf }}</p></div>
+      <div v-if="journal.summary" class="journey-paper-preview"><JourneyReceipt :journal="journal" :image-error="imageIssue" :image-busy="imageBusy" @retry-image="retryIllustration" /></div>
+      <div v-else class="journey-recovery"><h2>讲述已保留</h2><p>回信还没准备好，你可以直接重试。</p><div class="recovery-transcript" tabindex="0" aria-label="已保留的完整讲述">{{ journal.originalText }}</div></div>
       <div class="journey-result-content">
         <p v-if="imageIssue" class="journey-notice" role="status">{{ imageIssue }} <button class="journey-link" @click="retryIllustration">重试插画</button></p>
         <p v-if="imageBusy" class="journey-notice" role="status">正在画下你的期待…</p>
-        <button v-if="!journal.messageToSelf" class="journey-secondary" @click="composeNote"><JourneyIcon name="RotateCcw" />重新整理</button>
+        <button v-if="!journal.messageToSelf" class="journey-primary retry-note" @click="composeNote"><JourneyIcon name="RotateCcw" />重新整理</button>
         <template v-if="stage === 'printing'"><p class="journey-notice">{{ printReturned ? '打印窗口已关闭，请确认是否收到手记。' : '等待打印操作完成。' }}</p><div class="journey-actions"><button class="journey-primary" @click="complete"><JourneyIcon name="Check" />已收到手记</button><button class="journey-secondary" @click="backToPreview">返回预览</button></div></template>
         <template v-else>
-          <div class="journey-actions"><button class="journey-primary" :disabled="imageBusy" @click="printJournal"><JourneyIcon name="Printer" />打印手记</button><button v-if="audioUrl" class="journey-play" :aria-label="playing && !audioPaused ? '暂停播放' : '播放我的声音'" :title="playing && !audioPaused ? '暂停播放' : '播放我的声音'" @click="togglePlayback"><JourneyIcon :name="playing && !audioPaused ? 'Pause' : 'Play'" /></button><button v-else-if="journal.messageToSelf && voiceEnabled && voiceState === 'failed'" class="journey-secondary" @click="makeAudio(true, true)"><JourneyIcon name="Volume2" />重试声音</button></div>
+          <div class="journey-actions"><button v-if="journal.summary" class="journey-primary" :disabled="imageBusy" @click="printJournal"><JourneyIcon name="Printer" />打印手记</button><button v-if="audioUrl" class="journey-play" :aria-label="playing && !audioPaused ? '暂停播放' : '播放我的声音'" :title="playing && !audioPaused ? '暂停播放' : '播放我的声音'" @click="togglePlayback"><JourneyIcon :name="playing && !audioPaused ? 'Pause' : 'Play'" /></button><button v-else-if="journal.messageToSelf && voiceEnabled && voiceState === 'failed'" class="journey-secondary" @click="makeAudio(true, true)"><JourneyIcon name="Volume2" />重试声音</button></div>
         </template>
+        <button class="journey-secondary result-home" @click="reset"><JourneyIcon name="ArrowLeft" />返回首页</button>
       </div>
     </div>
-    <div v-else-if="stage === 'done'" class="journey-done"><JourneyIcon name="Sprout" :size="42" /><h2>这一刻，留住了。</h2><p>带上这份回信，慢慢走向你的未来。</p><button class="journey-primary" @click="reset(); beginJourney()"><JourneyIcon name="Phone" />开始新的通话</button></div>
+    <div v-else-if="stage === 'done'" class="journey-done"><JourneyIcon name="Sprout" :size="42" /><h2>这一刻，留住了。</h2><p>带上这份回信，慢慢走向你的未来。</p><button class="journey-primary" @click="reset"><JourneyIcon name="ArrowLeft" />返回首页</button></div>
     <Teleport to="body"><div v-if="journal && active" id="journey-print-root"><JourneyReceipt :journal="journal" /></div></Teleport>
   </section>
 </template>

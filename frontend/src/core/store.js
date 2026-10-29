@@ -7,6 +7,7 @@ const savedLocale = localStorage.getItem('amphion_locale')
 /* API Key 不随代码分发：首次使用请在页面「API 设置」中输入（保存于浏览器 localStorage） */
 export const store = reactive({
   apiKey: localStorage.getItem('amphion_key') || '',
+  asrManaged: false,
   locale: queryLocale === 'en' || queryLocale === 'zh' ? queryLocale : savedLocale === 'en' ? 'en' : 'zh',
   demoMode: true,
   logs: []           // { time, msg, cls }

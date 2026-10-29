@@ -18,3 +18,6 @@ venv/
 
 # 本次体验的临时音色映射（不保存录音或密钥）
 .journey-state/
+
+# Local ASR credentials
+amphion_key.txt

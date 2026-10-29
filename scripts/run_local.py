@@ -23,12 +23,14 @@ def main():
     if not npm:
         raise SystemExit('Install Node.js (with npm) first.')
     children = []
+    local_asr = ROOT / '.env.asr.json'
+    asr_env = {'JOURNEY_ASR_CONFIG_FILE': str(local_asr)} if local_asr.exists() else {}
     def stop(*_):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, stop)
     try:
         children.append(subprocess.Popen([sys.executable, '-m', 'server.main'], cwd=ROOT,
-            env={**os.environ, 'HOST': '127.0.0.1', 'PORT': '8767', 'JOURNEY_TTS_PROVIDER': 'bailian'}))
+            env={**os.environ, **asr_env, 'HOST': '127.0.0.1', 'PORT': '8767', 'JOURNEY_TTS_PROVIDER': 'bailian'}))
         children.append(subprocess.Popen([npm, 'run', 'dev', '--', '--host', '127.0.0.1', '--port', '5173', '--strictPort'],
             cwd=ROOT / 'frontend', start_new_session=True,
             env={**os.environ, 'GAOJIAOHUI_BACKEND_URL': 'http://127.0.0.1:8767'}))

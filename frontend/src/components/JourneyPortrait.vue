@@ -2,7 +2,6 @@
 import { computed, onMounted, onBeforeUnmount, ref } from 'vue'
 import { ArrowLeft, Copy, Check, Maximize2 } from '@lucide/vue'
 import { store } from '../core/store.js'
-import { toggleLocale } from '../core/i18n.js'
 
 const viewport = ref(null), shell = ref(null), scale = ref(.15), copied = ref(false)
 const source = computed(() => {
@@ -23,7 +22,6 @@ async function copyLink() {
   } catch { copied.value = false }
 }
 function fullscreen() { shell.value?.requestFullscreen?.().catch(() => {}) }
-function changeLanguage() { toggleLocale() }
 onMounted(() => {
   observer = new ResizeObserver(([entry]) => {
     scale.value = Math.max(.01, Math.min(entry.contentRect.width / 2160, entry.contentRect.height / 3840))
@@ -38,7 +36,6 @@ onBeforeUnmount(() => { observer?.disconnect(); clearTimeout(copyTimer) })
     <div class="portrait-toolbar">
       <a href="/" aria-label="返回普通页面" title="返回普通页面"><ArrowLeft :size="20" /></a>
       <span>和 2036 对话 <small>竖屏体验</small></span>
-      <button title="切换语言" aria-label="切换语言" @click="changeLanguage">{{ store.locale === 'en' ? '中' : 'EN' }}</button>
       <button :title="copied ? '链接已复制' : '复制体验链接'" :aria-label="copied ? '链接已复制' : '复制体验链接'" @click="copyLink"><Check v-if="copied" :size="20" /><Copy v-else :size="20" /></button>
       <button title="全屏体验" aria-label="全屏体验" @click="fullscreen"><Maximize2 :size="20" /></button>
       <span class="portrait-copy-status" role="status">{{ copied ? '链接已复制' : '' }}</span>

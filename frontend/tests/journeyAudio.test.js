@@ -11,6 +11,7 @@ async function audioModule(api = async () => ({}), options = {}) {
     static OPEN = 1
     constructor(url) { this.url = url; this.readyState = 0; this.sent = []; Socket.latest = this; queueMicrotask(() => { this.readyState = 1; this.onopen?.() }) }
     send(message) {
+      if (typeof message !== 'string') { this.sent.push(message); return }
       const data = JSON.parse(message)
       this.sent.push(data)
       if (data.type === 'session.update' && !options.waitForReady) queueMicrotask(() => this.receive({ type: 'session.created' }))
@@ -56,7 +57,7 @@ async function audioModule(api = async () => ({}), options = {}) {
     }
   }
   const storage = options.storage || new Map()
-  const ctx = vm.createContext({ console, setTimeout: options.setTimeout || setTimeout, clearTimeout, queueMicrotask, WebSocket: Socket, Blob, FormData, AbortSignal, AbortController, DOMException, crypto: webcrypto, Audio,
+  const ctx = vm.createContext({ console, setTimeout: options.setTimeout || setTimeout, clearTimeout, queueMicrotask, WebSocket: Socket, Blob, FormData, AbortSignal, AbortController, DOMException, URL, crypto: webcrypto, Audio,
     navigator: { locks: options.locks },
     fetch: async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(44) }),
     localStorage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value) },
@@ -71,6 +72,7 @@ async function audioModule(api = async () => ({}), options = {}) {
           process: async (pcm, emit) => emit(pcm, pcm.some(value => value !== 0), pcm.some(value => value !== 0)),
           flush() {}, dispose() {},
         }) }
+      : specifier === './store.js' ? { store: { asrManaged: options.managed === true } }
       : { WS_HOST: 'wss://example.test', api }
     return new vm.SyntheticModule(Object.keys(values), function () { for (const [key, value] of Object.entries(values)) this.setExport(key, value) }, { context: ctx })
   })
@@ -78,12 +80,140 @@ async function audioModule(api = async () => ({}), options = {}) {
   return { ...module.namespace, Socket, Mic, AudioContext, storage }
 }
 
+const managedSession = { url: 'wss://example.test/v1/asr/realtime?speech_model=fourhz-spectrum&token=test-session' }
+
+test('managed ASR obtains a temporary session and waits for Begin before capturing audio', async () => {
+  const calls = [], phases = []
+  const { JourneyRecorder, Socket, Mic } = await audioModule(async (path, options) => {
+    calls.push({ path, options }); return managedSession
+  }, { managed: true })
+  const recorder = new JourneyRecorder('', { onPhase: phase => phases.push(phase) })
+  const starting = recorder.start()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(calls[0].path, '/asr-session')
+  assert.equal(calls[0].options.prefix, '/api/journey')
+  assert.equal(calls[0].options.method, 'POST')
+  assert.equal(Socket.latest.url, managedSession.url)
+  assert.equal(Mic.latest.callback, undefined)
+  assert.equal(Socket.latest.sent.length, 0)
+  Socket.latest.receive({ type: 'Begin', id: 'test-session' })
+  await starting
+  assert.deepEqual(phases, ['microphone', 'speech', 'connection', 'ready'])
+  assert.equal(typeof Mic.latest.callback, 'function')
+  recorder.stop()
+})
+
+test('managed ASR sends 500 ms little endian PCM and flushes the remainder before Terminate', async () => {
+  const { JourneyRecorder, Socket, Mic } = await audioModule(async () => managedSession, { managed: true })
+  const recorder = new JourneyRecorder('')
+  const starting = recorder.start()
+  await new Promise(resolve => setImmediate(resolve))
+  Socket.latest.receive({ type: 'Begin' })
+  await starting
+  const samples = new Int16Array(10001)
+  for (let index = 0; index < samples.length; index++) samples[index] = index % 2 ? -1234 : 2345
+  Mic.latest.callback(samples)
+  await recorder.processing
+  assert.equal(Socket.latest.sent.length, 1)
+  assert.equal(Socket.latest.sent[0].byteLength, 16000)
+  const finishing = recorder.finish()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(Socket.latest.sent.length, 3)
+  assert.equal(Socket.latest.sent[1].byteLength, 4002)
+  assert.equal(Socket.latest.sent[2].type, 'Terminate')
+  const decoded = Socket.latest.sent.slice(0, 2).flatMap(bytes => {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    return Array.from({ length: bytes.byteLength / 2 }, (_, index) => view.getInt16(index * 2, true))
+  })
+  assert.deepEqual(decoded, Array.from(samples))
+  Socket.latest.receive({ type: 'Termination' })
+  await finishing
+  assert.ok(Mic.latest.stopped)
+})
+
+test('managed Turn snapshots replace partial text and finishing waits for Termination', async () => {
+  const { JourneyRecorder, Socket, Mic } = await audioModule(async () => managedSession, { managed: true })
+  const recorder = new JourneyRecorder('')
+  const starting = recorder.start()
+  await new Promise(resolve => setImmediate(resolve))
+  Socket.latest.receive({ type: 'Begin' })
+  await starting
+  Mic.latest.callback(new Int16Array(8000).fill(900))
+  await recorder.processing
+  Socket.latest.receive({ type: 'Turn', turn_order: 0, transcript: '我希望', end_of_turn: false })
+  Socket.latest.receive({ type: 'Turn', turn_order: 0, transcript: '我希望去看海。', end_of_turn: true })
+  Socket.latest.receive({ type: 'Turn', turn_order: 0, transcript: '我希望', end_of_turn: false })
+  Socket.latest.receive({ type: 'Turn', turn_order: 1, transcript: '和爸妈', end_of_turn: false })
+  assert.equal(recorder.text, '我希望去看海。\n和爸妈')
+  let done = false
+  const first = recorder.finish(), second = recorder.finish()
+  first.then(() => { done = true })
+  await new Promise(resolve => setImmediate(resolve))
+  Socket.latest.receive({ type: 'Turn', turn_order: 1, transcript: '和爸妈一起。', end_of_turn: true })
+  await Promise.resolve()
+  assert.equal(done, false)
+  assert.equal(Socket.latest.sent.filter(message => message.type === 'Terminate').length, 1)
+  Socket.latest.receive({ type: 'Termination' })
+  assert.equal(await first, '我希望去看海。\n和爸妈一起。')
+  assert.equal(await second, '我希望去看海。\n和爸妈一起。')
+})
+
+test('managed Error fails finalization explicitly and preserves received speech', async () => {
+  const { JourneyRecorder, Socket, Mic } = await audioModule(async () => managedSession, { managed: true })
+  const recorder = new JourneyRecorder('')
+  const starting = recorder.start()
+  await new Promise(resolve => setImmediate(resolve))
+  Socket.latest.receive({ type: 'Begin' })
+  await starting
+  Mic.latest.callback(new Int16Array(8000).fill(900))
+  await recorder.processing
+  Socket.latest.receive({ type: 'Turn', turn_order: 0, transcript: '保留这段话', end_of_turn: true })
+  const finishing = recorder.finish()
+  await new Promise(resolve => setImmediate(resolve))
+  Socket.latest.receive({ type: 'Error', error: 'test provider error' })
+  await assert.rejects(finishing, /语音识别服务暂时不可用/)
+  assert.equal(recorder.text, '保留这段话')
+  assert.ok(Mic.latest.stopped)
+  assert.equal(Socket.latest.readyState, 3)
+})
+
+test('managed Error before Begin rejects startup without recording', async () => {
+  const { JourneyRecorder, Socket, Mic } = await audioModule(async () => managedSession, { managed: true })
+  const recorder = new JourneyRecorder('')
+  const starting = recorder.start()
+  await new Promise(resolve => setImmediate(resolve))
+  Socket.latest.receive({ type: 'Error', error: 'test authorization rejection' })
+  await assert.rejects(starting, /语音识别服务暂时不可用/)
+  assert.equal(Mic.latest.callback, undefined)
+  assert.ok(Mic.latest.stopped)
+  assert.equal(Socket.latest.readyState, 3)
+})
+
+test('managed session cancellation aborts authorization and never opens a late socket', async () => {
+  const authorization = deferred(), requested = deferred()
+  let signal
+  const { JourneyRecorder, Socket, Mic } = await audioModule(async (_, options) => {
+    signal = options.signal; requested.resolve(); return authorization.promise
+  }, { managed: true })
+  const recorder = new JourneyRecorder('')
+  const starting = recorder.start()
+  await requested.promise
+  recorder.stop()
+  await assert.rejects(starting, /会话已结束/)
+  assert.equal(signal.aborted, true)
+  authorization.resolve(managedSession)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(Socket.latest, undefined)
+  assert.ok(Mic.latest.stopped)
+})
+
 test('finishing commits once and waits for the last corrected transcript', async () => {
   const { JourneyRecorder, Socket, Mic } = await audioModule()
   const received = []
   const recorder = new JourneyRecorder('test-only', { onText: text => received.push(text) })
   await recorder.start()
   Mic.latest.callback(new Int16Array(3200).fill(900))
+  await recorder.processing
   assert.ok(Socket.latest.url.startsWith('wss://example.test/asr/v1/target-dialogue?'))
   assert.equal(Socket.latest.sent[0].session.filter.mode, 'open')
   Socket.latest.receive({ type: 'transcription.partial', segment_id: 1, text: '今天看到一个机' })
@@ -105,6 +235,7 @@ test('segmented transcripts preserve earlier speech and await session completion
   const recorder = new JourneyRecorder('test-only', { onText: (text, final) => received.push({ text, final }) })
   await recorder.start()
   Mic.latest.callback(new Int16Array(3200).fill(900))
+  await recorder.processing
   Socket.latest.receive({ type: 'transcription.partial', segment_id: 0, text: '今天想留下' })
   Socket.latest.receive({ type: 'transcription.final', segment_id: 0, text: '今天想留下一个想法。' })
   Socket.latest.receive({ type: 'transcription.final', segment_id: 0, text: '今天想留下一个想法。' })
@@ -184,6 +315,7 @@ test('ASR errors during finalization keep the transcript and fail explicitly', a
   const recorder = new JourneyRecorder('test-only')
   await recorder.start()
   Mic.latest.callback(new Int16Array(3200).fill(900))
+  await recorder.processing
   Socket.latest.receive({ type: 'transcription.partial', segment_id: 1, text: '已经识别的内容' })
   const finishing = recorder.finish()
   Socket.latest.receive({ type: 'error', message: 'backend unavailable' })
@@ -507,4 +639,21 @@ test('microphone reuses the unlocked output context without closing it or asking
   mic.stop()
   assert.ok(stopped)
   assert.equal(closed, false)
+})
+
+ test('silence cannot produce a transcript or mark speech captured, but real speech can', async () => {
+  const { JourneyRecorder, Socket, Mic } = await audioModule()
+  const received = []; let captured = 0
+  const recorder = new JourneyRecorder('test-only', { onText: text => received.push(text), onAudio: () => captured++ })
+  await recorder.start()
+  for (let i = 0; i < 20; i++) { Mic.latest.callback(new Int16Array(3200)); await recorder.processing }
+  Socket.latest.receive({ type: 'transcription.final', segment_id: 0, text: '该物种的模式产地在湖北宜昌。' })
+  assert.equal(recorder.text, '')
+  assert.equal(received.length, 0)
+  assert.equal(captured, 0)
+  Mic.latest.callback(new Int16Array(3200).fill(900)); await recorder.processing
+  Socket.latest.receive({ type: 'transcription.final', segment_id: 1, text: '我希望带家人旅行。' })
+  assert.equal(recorder.text, '我希望带家人旅行。')
+  assert.ok(captured > 0)
+  recorder.stop()
 })

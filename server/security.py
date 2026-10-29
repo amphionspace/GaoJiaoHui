@@ -6,6 +6,10 @@ import os
 import time
 from collections import OrderedDict, deque
 from fastapi import HTTPException, Request
+try:
+    from . import managed_asr
+except ImportError:
+    import managed_asr
 
 
 class AccessControl:
@@ -29,6 +33,16 @@ class AccessControl:
 
     async def authorize(self, request):
         self.consume('ip:' + (request.client.host if request.client else 'unknown'), 30)
+        if managed_asr.enabled():
+            identity = managed_asr.require_session(request)
+            if self.valid.get(identity, 0) <= time.monotonic():
+                if self.auth_slots.locked():
+                    raise HTTPException(503, '连接校验繁忙，请稍后重试。')
+                async with self.auth_slots:
+                    await managed_asr.mint_token()
+                self.valid[identity] = time.monotonic() + 60
+            self.consume('key:' + identity, 10)
+            return identity
         key = request.headers.get('x-api-key', '').strip()
         if not key or len(key) > 512:
             raise HTTPException(401, '请先填写有效的语音网关密钥。')

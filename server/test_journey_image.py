@@ -22,7 +22,18 @@ class JourneyImageTests(unittest.IsolatedAsyncioTestCase):
             calls.append(request)
             if request.method == 'POST':
                 self.assertEqual(request.headers['authorization'], 'Bearer test-only')
+                self.assertEqual(json.loads(request.content)['size'], '1024x1024')
+                self.assertIn('保留大量', json.loads(request.content)['prompt'])
+                self.assertIn('soft gouache', json.loads(request.content)['prompt'])
                 self.assertIn('机器人陪爸妈散步', json.loads(request.content)['prompt'])
+                self.assertIn('彩色极简叙事插画', json.loads(request.content)['prompt'])
+                self.assertIn('低饱和', json.loads(request.content)['prompt'])
+                self.assertIn('纸张拼贴感', json.loads(request.content)['prompt'])
+                self.assertIn('明确的彩色色块', json.loads(request.content)['prompt'])
+                self.assertIn('像素风', json.loads(request.content)['prompt'])
+                self.assertIn('黑白钢笔线稿', json.loads(request.content)['prompt'])
+                self.assertIn('完整便签', json.loads(request.content)['prompt'])
+                self.assertNotIn('固定风格：简约漫画风格', json.loads(request.content)['prompt'])
                 return httpx.Response(200, json={'data': [{'url': 'https://image.oss-cn-beijing.aliyuncs.com/test.png'}]})
             self.assertNotIn('authorization', request.headers)
             return httpx.Response(200, content=raw)
@@ -61,6 +72,13 @@ class JourneyImageTests(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(200, content=raw)
             with patch.object(journey_image, 'MAX_IMAGE_BYTES', 64), self.assertRaises(HTTPException):
                 await self.invoke(handler)
+
+    async def test_quota_failure_reports_actionable_reason_without_provider_details(self):
+        with self.assertRaises(HTTPException) as error:
+            await self.invoke(lambda _: httpx.Response(403, json={'error': {'code': 'insufficient_quota', 'message': 'private account details'}}))
+        self.assertEqual(error.exception.status_code, 503)
+        self.assertIn('额度不足', error.exception.detail)
+        self.assertNotIn('private', error.exception.detail)
 
     async def test_timeout_is_recoverable(self):
         def handler(request):

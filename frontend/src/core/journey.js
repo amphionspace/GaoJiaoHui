@@ -87,13 +87,14 @@ export async function composeJourneyJournal(journal, { signal, apiKey = '', requ
   })
   const data = await response.json()
   if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : data.detail?.message || '回信暂时无法生成，完整讲述已保留。')
-  if (data.generation !== 'model' || !data.summary?.trim() || !data.message?.trim() || !Array.isArray(data.keywords)) {
+  const noteText = data.note_text || data.summary
+  if (data.generation !== 'model' || !noteText?.trim() || !data.message?.trim() || !Array.isArray(data.keywords)) {
     throw new Error('回信内容不完整，完整讲述已保留，请重新整理。')
   }
   if (Array.from(data.message).length > 50) {
     throw new Error('这次回信太长，完整讲述已保留，请重新整理。')
   }
-  return { ...journal, summary: data.summary, messageToSelf: data.message, takeaway: data.takeaway || '', keywords: data.keywords,
+  return { ...journal, noteText, summary: noteText, messageToSelf: data.message, takeaway: data.takeaway || '', keywords: data.keywords,
     generation: 'model', textModel: data.model, sketchPrompt: data.sketch_prompt || '' }
 }
 
@@ -101,7 +102,7 @@ export async function illustrateJourneyJournal(journal, { signal, apiKey = '', r
   const response = await request('/api/journey/illustrate', {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
     signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(105000)]) : AbortSignal.timeout(105000),
-    body: JSON.stringify({ summary: journal.summary, scene: journal.sketchPrompt || '' }),
+    body: JSON.stringify({ summary: journal.summary, scene: journal.sketchPrompt || journal.summary }),
   })
   const data = await response.json()
   if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : '插画暂时未能生成，可以重试或打印文字手记。')

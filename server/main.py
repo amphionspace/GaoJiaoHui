@@ -27,20 +27,20 @@ from urllib.parse import urlsplit
 import httpx
 import httpcore
 from httpcore._backends.anyio import AnyIOBackend
-from fastapi import FastAPI, Request, Response, HTTPException
+from fastapi import FastAPI, Request, Response, HTTPException, Depends
 from starlette.datastructures import UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 try:
     from .journey_text import router as journey_text_router
     from .journey_image import router as journey_image_router
-    from .security import RequestLimits
-    from . import bailian_tts
+    from .security import RequestLimits, compose_access
+    from . import bailian_tts, managed_asr
 except ImportError:
     from journey_text import router as journey_text_router
     from journey_image import router as journey_image_router
-    from security import RequestLimits
-    import bailian_tts
+    from security import RequestLimits, compose_access
+    import bailian_tts, managed_asr
 
 UPSTREAM = os.environ.get('GATEWAY_URL', 'https://amphion.top').rstrip('/')
 UPSTREAM_HOST = urlsplit(UPSTREAM).hostname
@@ -215,10 +215,17 @@ async def journey_tts(path: str, request: Request):
 
 
 @app.get("/api/config")
-async def config():
+async def config(request: Request, response: Response):
     """前端运行时配置（示例：上游地址），便于后续将 Key 移到服务端注入。"""
-    return {"upstream": UPSTREAM,
+    if managed_asr.enabled():
+        managed_asr.issue_cookie(request, response)
+    return {"upstream": UPSTREAM, "asrManaged": managed_asr.enabled(),
             "wsHost": ASR_WS_URL, "wsLegacy": ASR_REALTIME_WS_URL}
+
+
+@app.post('/api/journey/asr-session', dependencies=[Depends(compose_access)])
+async def asr_session():
+    return {'url': await managed_asr.session_url()}
 
 
 @app.get('/api/health')
