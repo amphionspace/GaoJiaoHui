@@ -26,7 +26,7 @@ class JourneyImageTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('保留大量', json.loads(request.content)['prompt'])
                 self.assertIn('soft gouache', json.loads(request.content)['prompt'])
                 self.assertIn('机器人陪爸妈散步', json.loads(request.content)['prompt'])
-                self.assertIn('彩色极简叙事插画', json.loads(request.content)['prompt'])
+                self.assertIn('独立插画贴纸', json.loads(request.content)['prompt'])
                 self.assertIn('低饱和', json.loads(request.content)['prompt'])
                 self.assertIn('纸张拼贴感', json.loads(request.content)['prompt'])
                 self.assertIn('明确的彩色色块', json.loads(request.content)['prompt'])
