@@ -1,6 +1,6 @@
 # 后台看板与服务监控
 
-运维入口：`https://amphion-gjh.amphiondev.com/admin`。只统计聚合数据，**不记录讲述、音频、密钥或后台密码**；计数在服务重启后归零。
+运维入口：`https://amphion-gjh.amphiondev.com/admin`。默认只统计聚合数据，**不记录音频、密钥或后台密码**；计数在服务重启后归零。可选的“会话记录”会在开启后保存讲述原文与手记，保留期与开关见下文。
 
 ## 组成
 
@@ -38,6 +38,25 @@ JOURNEY_ADMIN_PASSWORD=<长随机密码>
 - **接口表**：按路径统计次数、5xx、P50/P95。流式接口 `compose/stream` 的时延是**首字节**，不代表整段生成耗时，看“阶段时延”更准确。
 - **最近错误**：最近 40 条，只有时间、路径、状态码、错误码，不含任何正文。
 
+## 会话记录（可选）
+
+看板里的“最近会话”用于现场复盘：某位访客说了什么、生成了什么手记、各阶段用了多久。默认关闭，当前线上已开启。
+
+配置 `/etc/amphion-gjh/session.env`（`600 root:root`），修改后 `systemctl restart amphion-gjh`：
+
+```ini
+JOURNEY_SESSION_LOG=1                 # 1 开启会话记录；0 完全关闭
+JOURNEY_SESSION_TRANSCRIPT=1          # 1 保存讲述原文；0 只保存手记/回信，不存原文
+JOURNEY_SESSION_RETENTION_DAYS=7      # 1-90 天，插入时自动清理过期记录
+JOURNEY_SESSION_MAX=500               # 最多保留条数
+```
+
+- 存储：`/opt/amphion-gjh/releases/<release>/.journey-state/sessions.sqlite3`（与音色状态同目录）；**不保存音频**。
+- 一条记录包含：时间、主题、讲述原文（可关闭）、手记、回信、关键词、模型、草稿/终版耗时、是否完成审校。
+- 看板里点击任意一条可展开原文与手记；“清空”按钮会删除全部会话记录，删除前有确认。
+- 记录只通过 `/api/admin/sessions` 暴露，需要后台 Basic 认证；服务端写入失败不会影响访客拿到手记。
+- 隐私建议：展期结束或移交设备前，用“清空”按钮删除记录；不需要复盘时把 `JOURNEY_SESSION_LOG=0` 并重启。
+
 ## 告警
 
 `journey-monitor.timer` 每分钟运行 `journey-monitor.service`，读取本机 `/api/health`：
@@ -71,11 +90,11 @@ sudo -u amphion-gjh /usr/bin/python3 /opt/amphion-gjh/bin/journey-monitor.py --d
 
 ## 部署与更新
 
-1. 同步 `server/`（含 `metrics.py`、`monitor.py`），构建前端不需要重跑。
+1. 同步 `server/`（含 `metrics.py`、`monitor.py`、`sessions.py`），构建前端不需要重跑。
 2. `install -m 644 deploy/journey-monitor.service /etc/systemd/system/`，同样安装 `.timer`。
-3. 首次创建 `/etc/amphion-gjh/admin.env` 与 `/etc/amphion-gjh/monitor.env`（参考 `.example`，权限 600）。
+3. 首次创建 `/etc/amphion-gjh/admin.env`、`monitor.env`、`session.env`（参考 `.example`，权限 600）。
 4. `install -m 755 server/monitor.py /opt/amphion-gjh/bin/journey-monitor.py`，目录属主 `amphion-gjh`。
-5. 给 `amphion-gjh.service` 的 drop-in 增加 `EnvironmentFile=/etc/amphion-gjh/admin.env`。
+5. 给 `amphion-gjh.service` 的 drop-in 增加两条 `EnvironmentFile=`：`admin.env` 与 `session.env`。
 6. `systemctl daemon-reload && systemctl restart amphion-gjh && systemctl enable --now journey-monitor.timer`。
 
 监控脚本独立于 release 目录，升级版本时不用改 unit；应用侧只依赖 `server/metrics.py` 与新增路由。

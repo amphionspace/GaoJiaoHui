@@ -1,10 +1,13 @@
 import base64
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
 
-from server import main
+from server import main, sessions as session_store
 
 ADMIN_ENV = {'JOURNEY_ADMIN_USER': 'admin', 'JOURNEY_ADMIN_PASSWORD': 'test-admin-password', 'JOURNEY_ADMIN_IPS': ''}
 
@@ -88,6 +91,28 @@ class AdminTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(name, data['checks'])
         self.assertIn('recent', data['stats'])
         self.assertIn(data['status'], ('ok', 'degraded'))
+
+    async def test_admin_sessions_are_protected_and_clearable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = {**ADMIN_ENV, 'JOURNEY_SESSION_LOG': '1',
+                   'JOURNEY_SESSION_DB': str(Path(directory) / 'sessions.sqlite3')}
+            request = SimpleNamespace(transcript='我想让爸爸省点力。', topic='future', language='zh')
+            note = SimpleNamespace(note_text='我想让爸爸省点力。', message='你想让爸爸少弯一点腰。', keywords=['爸爸'])
+            with patch.dict('os.environ', env):
+                session_store.record_draft('one', request, note, 1200, 'deepseek-chat')
+                async with client() as api:
+                    denied = await api.get('/api/admin/sessions')
+                    allowed = await api.get('/api/admin/sessions', headers=basic())
+                    cleared = await api.post('/api/admin/sessions/clear', headers=basic())
+                self.assertEqual(denied.status_code, 401)
+                self.assertEqual(allowed.status_code, 200)
+                data = allowed.json()
+                self.assertTrue(data['enabled'])
+                self.assertEqual(data['total'], 1)
+                self.assertEqual(data['sessions'][0]['transcript'], request.transcript)
+                self.assertEqual(data['sessions'][0]['draft_ms'], 1200)
+                self.assertEqual(cleared.status_code, 200)
+                self.assertEqual(session_store.count(), 0)
 
 
 if __name__ == '__main__':

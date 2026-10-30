@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+import uuid
 from pathlib import Path
 from typing import Literal
 
@@ -14,9 +15,11 @@ from pydantic import BaseModel, Field, ValidationError
 try:
     from .security import compose_access
     from .metrics import metrics
+    from . import sessions
 except ImportError:
     from security import compose_access
     from metrics import metrics
+    import sessions
 
 router = APIRouter(prefix="/api/journey")
 CONFIG_FILE = Path(__file__).resolve().parents[1] / ".env.journey.json"
@@ -259,6 +262,7 @@ async def compose_notes(request, config=None):
     """
     config = config or compose_configuration(request)
     started = time.monotonic()
+    session_id = uuid.uuid4().hex
     headers = {"Authorization": "Bearer " + config["api_key"]} if config["api_key"] else {}
     english = request.language == "en"
     messages = [
@@ -292,6 +296,8 @@ async def compose_notes(request, config=None):
             try:
                 content = response.json()["choices"][0]["message"]["content"]
                 note = parse_note(content, request.transcript, request.language)
+                draft_ms = round((time.monotonic() - started) * 1000)
+                sessions.record_draft(session_id, request, note, draft_ms, config["model"])
                 metrics.event("compose_draft")
                 metrics.observe("compose_draft_seconds", time.monotonic() - started)
                 yield "draft", note, config
@@ -306,6 +312,7 @@ async def compose_notes(request, config=None):
                 if reviewed.status_code >= 400:
                     raise HTTPException(502, detail={"code": "text_review_failed", "message": "回信审校暂时不可用，讲述已保留，请重试。"})
                 reviewed_note = parse_note(reviewed.json()["choices"][0]["message"]["content"], request.transcript, request.language)
+                sessions.record_final(session_id, reviewed_note, round((time.monotonic() - started) * 1000))
                 metrics.event("compose_final")
                 metrics.observe("compose_final_seconds", time.monotonic() - started)
                 yield "final", reviewed_note, config

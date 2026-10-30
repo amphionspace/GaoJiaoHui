@@ -46,7 +46,7 @@ HOST=127.0.0.1 PORT=8766 .venv/bin/python -m server.main
 
 文本与百炼声音接口共用限流：每来源每分钟最多 30 次、每密钥每分钟 10 次。文本同时最多 2 次；单进程文本总并发最多 8 次。密钥哈希缓存 60 秒，错误响应不回显密钥或完整上游异常。限流是单进程方案，扩容前需改为共享存储。
 
-- **运维看板**：`https://amphion-gjh.amphiondev.com/admin`（HTTP Basic，账号见服务器 `/etc/amphion-gjh/admin.env`）。展示服务与依赖状态、请求量、旅程阶段时延、接口统计和最近错误；Prometheus 指标在 `/metrics`。只统计聚合数据，不记录讲述、音频或密钥。
+- **运维看板**：`https://amphion-gjh.amphiondev.com/admin`（HTTP Basic，账号见服务器 `/etc/amphion-gjh/admin.env`）。展示服务与依赖状态、请求量、旅程阶段时延、接口统计和最近错误；Prometheus 指标在 `/metrics`。默认只统计聚合数据；可选的“会话记录”会把单次讲述与手记保存在服务器，默认保留 7 天、不保存音频，开关与保留期见 [后台与监控](docs/ADMIN.md#会话记录可选)。
 - **告警**：`journey-monitor.timer` 每分钟检查 `/api/health`，异常与恢复推企业微信群机器人；webhook 配置在 `/etc/amphion-gjh/monitor.env`。接入与排障见 [后台与监控](docs/ADMIN.md)。
 
 ## 验证

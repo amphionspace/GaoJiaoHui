@@ -41,14 +41,14 @@ try:
     from .journey_image import router as journey_image_router
     from .security import RequestLimits, compose_access
     from .metrics import metrics as metrics_store
-    from . import bailian_tts, managed_asr
+    from . import bailian_tts, managed_asr, sessions
 except ImportError:
     from journey_text import router as journey_text_router
     from journey_text import configuration as text_configuration
     from journey_image import router as journey_image_router
     from security import RequestLimits, compose_access
     from metrics import metrics as metrics_store
-    import bailian_tts, managed_asr
+    import bailian_tts, managed_asr, sessions
 
 UPSTREAM = os.environ.get('GATEWAY_URL', 'https://amphion.top').rstrip('/')
 UPSTREAM_HOST = urlsplit(UPSTREAM).hostname
@@ -370,6 +370,23 @@ async def admin_stats():
     }
 
 
+@app.get('/api/admin/sessions', dependencies=[Depends(require_admin)])
+async def admin_sessions(limit: int = 30, offset: int = 0):
+    limit = max(1, min(int(limit), 100))
+    offset = max(0, int(offset))
+    return {
+        'enabled': sessions.enabled(), 'retention_days': sessions.retention_days(),
+        'keep_transcript': sessions.keep_transcript(), 'total': sessions.count(),
+        'sessions': sessions.recent(limit, offset),
+    }
+
+
+@app.post('/api/admin/sessions/clear', dependencies=[Depends(require_admin)])
+async def admin_sessions_clear():
+    sessions.clear()
+    return {'cleared': True}
+
+
 @app.get('/metrics', dependencies=[Depends(require_admin)])
 async def prometheus_metrics():
     checks = health_checks()
@@ -417,6 +434,21 @@ footer{color:var(--dim);font-size:12px;line-height:1.8}
 button{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:7px;padding:7px 14px;cursor:pointer;font-size:12px}
 button:hover{border-color:var(--acc);color:var(--acc)}
 .alert{background:#fbe9e3;border-color:#f0c9bd;color:#8f3b24}
+.session-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:10px}
+.session-head h2{margin:0}
+.session-tools{display:flex;align-items:center;gap:10px;color:var(--dim);font-size:11.5px}
+details.session{border-top:1px solid var(--line);padding:8px 0}
+details.session:first-of-type{border-top:0}
+details.session summary{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:baseline;cursor:pointer;list-style:none;font-size:12.5px}
+details.session summary::-webkit-details-marker{display:none}
+details.session summary .s-time{color:var(--dim);font-size:11.5px;font-variant-numeric:tabular-nums}
+details.session summary .s-topic{color:var(--acc);font-size:11.5px}
+details.session summary .s-note{flex:1;min-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+details.session[open] summary .s-note{white-space:normal}
+details.session summary .s-meta{color:var(--dim);font-size:11px;white-space:nowrap}
+.session-body{margin:10px 0 4px;display:grid;gap:10px}
+.session-body h4{margin:0 0 4px;font-size:11px;color:var(--dim);font-weight:600}
+.session-body p{margin:0;font-size:12.5px;line-height:1.7;white-space:pre-wrap;word-break:break-word;max-height:220px;overflow:auto;background:#fbf9f4;border:1px solid var(--line);border-radius:7px;padding:8px 10px}
 @media (max-width:640px){header{padding:14px 16px}main{padding:14px 16px 32px}}
 </style>
 </head>
@@ -437,15 +469,22 @@ button:hover{border-color:var(--acc);color:var(--acc)}
     <div class="card"><h2>旅程阶段</h2><div id="events"></div></div>
     <div class="card"><h2>阶段时延</h2><div id="latency"></div></div>
   </div>
+  <section class="card">
+    <div class="session-head"><h2>最近会话</h2><div class="session-tools"><span id="session-meta"></span><button id="session-clear" type="button">清空</button></div></div>
+    <div id="sessions"></div>
+    <p class="note" id="session-note"></p>
+  </section>
   <section class="card"><h2>接口</h2><div id="paths"></div><p class="note">流式接口（compose/stream）的时延为首字节时间；草稿与终版的实际时延见上方“阶段时延”。</p></section>
   <section class="card"><h2>最近错误</h2><div id="errors"></div></section>
-  <footer>仅统计聚合数据，不记录讲述、音频或密钥；计数自服务启动。企业微信告警由 journey-monitor.timer 每分钟检查并推送。</footer>
+  <footer>看板默认只统计聚合数据；会话记录可在服务器开启并自动过期，音频始终不保存。企业微信告警由 journey-monitor.timer 每分钟检查并推送。</footer>
 </main>
 <script>
 const $ = id => document.getElementById(id)
 const esc = value => String(value == null ? '' : value).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
 const dot = ok => '<span class="dot ' + (ok ? 'ok' : 'bad') + '"></span>'
 const CHECK_LABELS = { frontend: '前端构建', text: '文本模型', asr: '语音识别', tts: '声音合成', disk: '磁盘' }
+const TOPIC_LABELS = { future: '未来', product: '产品', idea: '想法', story: '故事' }
+let openSessions = new Set()
 const EVENT_LABELS = { compose_draft: '草稿上屏', compose_final: '审校完成', compose_review_fallback: '审校回退', compose_error: '整理失败', asr_session: '语音会话', illustrate: '插画请求', illustrate_error: '插画失败' }
 const LATENCY_LABELS = { compose_draft_seconds: '草稿时延', compose_final_seconds: '终版时延' }
 function detail(name, check) {
@@ -499,6 +538,41 @@ function render(data) {
         '</td><td>' + esc(item.code) + '</td></tr>').join('') + '</tbody></table>'
     : '<div class="empty">暂无错误。</div>'
 }
+function ms(value) { return value == null ? '-' : (value / 1000).toFixed(1) + 's' }
+function renderSessions(data) {
+  $('session-meta').textContent = data.enabled ? ('共 ' + data.total + ' 条 · 保留 ' + data.retention_days + ' 天') : '未开启'
+  $('session-note').textContent = data.enabled
+    ? (data.keep_transcript ? '包含讲述原文，仅用于现场复盘；音频不会保存。' : '只保留手记与回信，不保存讲述原文。')
+    : '会话记录未开启：在服务器 /etc/amphion-gjh/session.env 设置 JOURNEY_SESSION_LOG=1 后重启。'
+  if (!data.enabled) { $('sessions').innerHTML = '<div class="empty">会话记录未开启。</div>'; return }
+  if (!data.sessions.length) { $('sessions').innerHTML = '<div class="empty">还没有会话记录，完成一次讲述后会出现。</div>'; return }
+  $('sessions').innerHTML = data.sessions.map(item =>
+    '<details class="session" data-id="' + esc(item.id) + '"' + (openSessions.has(item.id) ? ' open' : '') + '>' +
+      '<summary><span class="s-time">' + esc(item.created_at.slice(5)) + '</span>' +
+      '<span class="s-topic">' + esc(TOPIC_LABELS[item.topic] || item.topic) + '</span>' +
+      '<span class="s-note">' + esc(item.note_text || '（无手记）') + '</span>' +
+      '<span class="s-meta">' + item.transcript_chars + ' 字 · 草稿 ' + ms(item.draft_ms) + ' · 终版 ' + ms(item.final_ms) + (item.reviewed ? ' · 已审校' : ' · 未审校') + '</span></summary>' +
+      '<div class="session-body">' +
+        '<div><h4>讲述原文</h4><p>' + esc(item.transcript || '未保存') + '</p></div>' +
+        '<div><h4>手记</h4><p>' + esc(item.note_text || '（无）') + '</p></div>' +
+        '<div><h4>回信</h4><p>' + esc(item.message || '（无）') + '</p></div>' +
+        '<div><h4>关键词</h4><p>' + esc((item.keywords || []).join(' · ') || '（无）') + '</p></div>' +
+        '<div><h4>元信息</h4><p>模型 ' + esc(item.model || '-') + ' · 语言 ' + esc(item.language || '-') + '</p></div>' +
+      '</div></details>').join('')
+  document.querySelectorAll('details.session').forEach(node => {
+    node.addEventListener('toggle', () => {
+      if (node.open) openSessions.add(node.dataset.id)
+      else openSessions.delete(node.dataset.id)
+    })
+  })
+}
+async function loadSessions() {
+  try {
+    const response = await fetch('/api/admin/sessions?limit=30', { cache: 'no-store' })
+    if (!response.ok) return
+    renderSessions(await response.json())
+  } catch (error) { /* keep the previous list on a transient failure */ }
+}
 async function refresh() {
   try {
     const response = await fetch('/api/admin/stats', { cache: 'no-store' })
@@ -512,9 +586,14 @@ async function refresh() {
   }
 }
 $('refresh').addEventListener('click', refresh)
-refresh()
-setInterval(() => { if (!document.hidden) refresh() }, 10000)
-document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh() })
+$('session-clear').addEventListener('click', async () => {
+  if (!confirm('清空全部会话记录？此操作不可撤销。')) return
+  const response = await fetch('/api/admin/sessions/clear', { method: 'POST' })
+  if (response.ok) { openSessions.clear(); loadSessions() }
+})
+refresh(); loadSessions()
+setInterval(() => { if (!document.hidden) { refresh(); loadSessions() } }, 10000)
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { refresh(); loadSessions() } })
 </script>
 </body>
 </html>"""
