@@ -88,15 +88,15 @@ const noteFields = (journal, data) => {
   }
   return { ...journal, noteText, summary: noteText, messageToSelf: data.message, takeaway: data.takeaway || '',
     keywords: data.keywords, generation: 'model', textModel: data.model, sketchPrompt: data.sketch_prompt || '',
-    reviewed: data.reviewed !== false }
+    reviewed: data.reviewed !== false, sessionId: data.session_id || journal.sessionId || '' }
 }
 
 const responseError = data => new Error(typeof data?.detail === 'string'
   ? data.detail : data?.detail?.message || '回信暂时无法生成，完整讲述已保留。')
 
-export async function composeJourneyJournal(journal, { signal, apiKey = '', request = fetch, language = 'zh', onDraft, onWarning } = {}) {
+export async function composeJourneyJournal(journal, { signal, apiKey = '', request = fetch, language = 'zh', sessionId = '', onDraft, onWarning } = {}) {
   // Send the complete ASR record, including later corrections and additions.
-  const body = JSON.stringify({ transcript: journal.originalText, topic: journal.topicId, language })
+  const body = JSON.stringify({ transcript: journal.originalText, topic: journal.topicId, language, session_id: sessionId })
   const timeout = signal ? AbortSignal.any([signal, AbortSignal.timeout(90000)]) : AbortSignal.timeout(90000)
   const response = await request('/api/journey/compose/stream', {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },

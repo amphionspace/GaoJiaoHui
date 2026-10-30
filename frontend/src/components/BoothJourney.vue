@@ -79,6 +79,19 @@ let recorder = null, sound = null, voice = null, candidate = null, textRequest =
 let session = 0, audioTask = 0, turn = 0, finishing = false, introRun = 0
 let doneTimer, maxTimer
 let lastVoiceError = ''
+let visitSession = ''
+
+function currentSession() {
+  if (!visitSession) visitSession = crypto.randomUUID().replaceAll('-', '')
+  return visitSession
+}
+function reportPrint(sessionId) {
+  if (!sessionId) return
+  fetch('/api/journey/print', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': store.apiKey },
+    body: JSON.stringify({ session_id: sessionId }),
+  }).catch(() => {})
+}
 
 function unlockAudio() { sound?.unlock() }
 function clearTimers() { for (const timer of [doneTimer, maxTimer]) clearTimeout(timer) }
@@ -102,7 +115,7 @@ function cancelSession() {
   voice?.dispose(); voice = null; candidate = null; finishing = false; lastVoiceError = ''
 }
 function reset() {
-  cancelSession(); stage.value = 'welcome'; topicId.value = 'future'; text.value = ''; journal.value = null
+  cancelSession(); visitSession = ''; stage.value = 'welcome'; topicId.value = 'future'; text.value = ''; journal.value = null
   error.value = notice.value = voiceIssue.value = imageIssue.value = ''; imageBusy.value = false
   transcriptWarning.value = ''
   followTranscript.value = true
@@ -110,6 +123,7 @@ function reset() {
 }
 async function beginJourney() {
   if (!props.active || recording.value || connecting.value || textMode.value) return
+  visitSession = ''
   stopPlayback(); unlockAudio(); error.value = ''; notice.value = ''
   const id = session, run = ++introRun
   stage.value = 'intro'; introPlaying.value = true; guideSkipped.value = false; guideReplay.value++
@@ -205,7 +219,7 @@ function prepareVoice(blob) {
   voice?.dispose()
   candidate = blob; lastVoiceError = ''; voiceIssue.value = ''
   const id = session
-  const current = voice = new JourneyVoice(store.apiKey)
+  const current = voice = new JourneyVoice(store.apiKey, currentSession())
   voiceState.value = 'registering'
   return current.register(blob)
     .then(() => { if (id === session && voice === current) voiceState.value = 'ready' })
@@ -247,7 +261,7 @@ async function composeNote() {
     })
   try {
     const result = await composeJourneyJournal(draft, {
-      signal: controller.signal, apiKey: store.apiKey, language: store.locale,
+      signal: controller.signal, apiKey: store.apiKey, language: store.locale, sessionId: journal.value.sessionId || currentSession(),
       // The first pass returns a complete note; show it while the editorial pass runs.
       onDraft(partial) {
         if (!alive()) return
@@ -349,7 +363,11 @@ async function printJournal() {
   } catch { error.value = '插画尚未加载完成，请重试打印。'; stage.value = 'preview'; return }
   if (id === session && stage.value === 'printing') window.print()
 }
-function afterPrint() { if (stage.value === 'printing') printReturned.value = true }
+function afterPrint() {
+  if (stage.value !== 'printing') return
+  printReturned.value = true
+  reportPrint(journal.value?.sessionId || visitSession)
+}
 function backToPreview() { stage.value = 'preview' }
 function complete() { cancelSession(); stage.value = 'done'; error.value = notice.value = '' }
 watch(() => props.active, active => {

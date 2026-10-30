@@ -135,6 +135,7 @@ class ComposeRequest(BaseModel):
     transcript: str = Field(min_length=1, max_length=16000)
     topic: Literal["future", "product", "idea", "story"] = "future"
     language: Literal["zh", "en"] = "zh"
+    session_id: str = Field(default="", max_length=64, pattern=r"^[0-9a-zA-Z-]*$")
 
 
 class ComposedNote(BaseModel):
@@ -231,10 +232,15 @@ def parse_note(content, transcript, language="zh"):
     return note
 
 
-def public_note(note, config):
+def public_note(note, config, session_id=""):
     return {"note_text": note.note_text, "summary": note.note_text, "message": note.message,
             "takeaway": note.takeaway, "keywords": note.keywords, "sketch_prompt": note.sketch_prompt,
-            "generation": "model", "model": config["model"]}
+            "generation": "model", "model": config["model"], "session_id": session_id}
+
+
+def session_id_for(request):
+    value = (getattr(request, "session_id", "") or "").strip()
+    return value if sessions.SESSION_ID.fullmatch(value) else uuid.uuid4().hex
 
 
 def retry_prompt(error, english):
@@ -252,8 +258,8 @@ def compose_configuration(request):
     return config
 
 
-async def compose_notes(request, config=None):
-    """Yield ("draft"|"final", note, config) as each usable model result arrives.
+async def compose_notes(request, config=None, session_id=None):
+    """Yield ("draft"|"final", note, config, session_id) as each usable result arrives.
 
     The draft is emitted before the editorial pass so the browser can show text
     while the review is still running; a retry after a rejected review emits a
@@ -262,7 +268,7 @@ async def compose_notes(request, config=None):
     """
     config = config or compose_configuration(request)
     started = time.monotonic()
-    session_id = uuid.uuid4().hex
+    session_id = session_id or session_id_for(request)
     headers = {"Authorization": "Bearer " + config["api_key"]} if config["api_key"] else {}
     english = request.language == "en"
     messages = [
@@ -300,7 +306,7 @@ async def compose_notes(request, config=None):
                 sessions.record_draft(session_id, request, note, draft_ms, config["model"])
                 metrics.event("compose_draft")
                 metrics.observe("compose_draft_seconds", time.monotonic() - started)
-                yield "draft", note, config
+                yield "draft", note, config, session_id
                 # A separate editorial pass checks meaning, which length/anchor checks cannot establish.
                 reviewed = await post({
                     "model": config["model"], "temperature": 0.2, "max_tokens": MAX_COMPLETION_TOKENS,
@@ -315,7 +321,7 @@ async def compose_notes(request, config=None):
                 sessions.record_final(session_id, reviewed_note, round((time.monotonic() - started) * 1000))
                 metrics.event("compose_final")
                 metrics.observe("compose_final_seconds", time.monotonic() - started)
-                yield "final", reviewed_note, config
+                yield "final", reviewed_note, config, session_id
                 return
             except (KeyError, IndexError, TypeError, AttributeError, ValueError, ValidationError) as error:
                 if not attempt:
@@ -326,18 +332,26 @@ async def compose_notes(request, config=None):
 @router.post("/compose", dependencies=[Depends(compose_access)])
 async def compose(request: ComposeRequest):
     final = config = None
+    session_id = session_id_for(request)
+    started = time.monotonic()
     try:
-        async for kind, note, current in compose_notes(request):
+        async for kind, note, current, _ in compose_notes(request, session_id=session_id):
             config = current
             if kind == "final":
                 final = note
     except (httpx.TimeoutException, asyncio.TimeoutError):
+        sessions.record_failure(session_id, request, "text_timeout", (time.monotonic() - started) * 1000)
         raise HTTPException(504, detail={"code": "text_timeout", "message": "回信生成超时，完整讲述已保留，可以重新整理。"})
     except httpx.RequestError:
+        sessions.record_failure(session_id, request, "text_connection_failed", (time.monotonic() - started) * 1000)
         raise HTTPException(502, detail={"code": "text_connection_failed", "message": "无法连接文本服务，完整讲述已保留，请检查服务配置。"})
+    except HTTPException as error:
+        code = error.detail.get("code", "") if isinstance(error.detail, dict) else ""
+        sessions.record_failure(session_id, request, code, (time.monotonic() - started) * 1000)
+        raise
     if final is None:
         raise HTTPException(502, detail={"code": "text_invalid_result", "message": "这次回信未通过内容检查，完整讲述已保留，请重新整理。"})
-    return public_note(final, config)
+    return public_note(final, config, session_id)
 
 
 def stream_line(payload):
@@ -352,41 +366,51 @@ async def compose_stream(request: ComposeRequest):
     keep their real HTTP status; model failures that happen later become events.
     """
     config = compose_configuration(request)
+    session_id = session_id_for(request)
+    started = time.monotonic()
 
     async def events():
         draft = None
         try:
-            async for kind, note, _ in compose_notes(request, config):
+            async for kind, note, _, _ in compose_notes(request, config, session_id):
                 if kind == "draft":
                     draft = note
-                    yield stream_line({"stage": "draft", "reviewed": False, **public_note(note, config)})
+                    yield stream_line({"stage": "draft", "reviewed": False, "session_id": session_id,
+                                       **public_note(note, config, session_id)})
                 else:
-                    yield stream_line({"stage": "final", "reviewed": True, **public_note(note, config)})
+                    yield stream_line({"stage": "final", "reviewed": True, "session_id": session_id,
+                                       **public_note(note, config, session_id)})
         except HTTPException as error:
             detail = error.detail
             if draft is not None and isinstance(detail, dict) and detail.get("code") == "text_review_failed":
                 metrics.event("compose_review_fallback")
-                yield stream_line({"stage": "final", "reviewed": False, "warning": "这次只完成了一轮整理，文字已保留。", **public_note(draft, config)})
+                yield stream_line({"stage": "final", "reviewed": False, "session_id": session_id,
+                                   "warning": "这次只完成了一轮整理，文字已保留。", **public_note(draft, config, session_id)})
             else:
                 code = detail.get("code", "") if isinstance(detail, dict) else ""
                 metrics.event("compose_error")
                 metrics.error("/api/journey/compose/stream", error.status_code, code)
+                sessions.record_failure(session_id, request, code, (time.monotonic() - started) * 1000)
                 yield stream_line({"stage": "error", "status": error.status_code, "detail": detail})
         except (httpx.TimeoutException, asyncio.TimeoutError):
             if draft is not None:
                 metrics.event("compose_review_fallback")
-                yield stream_line({"stage": "final", "reviewed": False, "warning": "复核超时，已保留当前文字。", **public_note(draft, config)})
+                yield stream_line({"stage": "final", "reviewed": False, "session_id": session_id,
+                                   "warning": "复核超时，已保留当前文字。", **public_note(draft, config, session_id)})
             else:
                 metrics.event("compose_error")
                 metrics.error("/api/journey/compose/stream", 504, "text_timeout")
+                sessions.record_failure(session_id, request, "text_timeout", (time.monotonic() - started) * 1000)
                 yield stream_line({"stage": "error", "status": 504, "detail": {"code": "text_timeout", "message": "回信生成超时，完整讲述已保留，可以重新整理。"}})
         except httpx.RequestError:
             if draft is not None:
                 metrics.event("compose_review_fallback")
-                yield stream_line({"stage": "final", "reviewed": False, "warning": "复核暂时中断，已保留当前文字。", **public_note(draft, config)})
+                yield stream_line({"stage": "final", "reviewed": False, "session_id": session_id,
+                                   "warning": "复核暂时中断，已保留当前文字。", **public_note(draft, config, session_id)})
             else:
                 metrics.event("compose_error")
                 metrics.error("/api/journey/compose/stream", 502, "text_connection_failed")
+                sessions.record_failure(session_id, request, "text_connection_failed", (time.monotonic() - started) * 1000)
                 yield stream_line({"stage": "error", "status": 502, "detail": {"code": "text_connection_failed", "message": "无法连接文本服务，完整讲述已保留，请检查服务配置。"}})
     return StreamingResponse(events(), media_type="application/x-ndjson",
                              headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})

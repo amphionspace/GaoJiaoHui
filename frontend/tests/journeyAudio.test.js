@@ -712,3 +712,19 @@ test('microphone reuses the unlocked output context without closing it or asking
   assert.ok(captured > 0)
   recorder.stop()
 })
+
+test('voice requests carry the visit session id for the admin audio', async () => {
+  const calls = []
+  const { JourneyVoice } = await audioModule(async (path, options = {}) => {
+    calls.push({ path, headers: options.headers || {} })
+    if (path === '/tts/v1/audio/voices') return { status: 'ready' }
+    if (path === '/tts/v1/audio/speech') return new Blob(['wav'])
+    return {}
+  })
+  const voice = new JourneyVoice('test-only', 'session12345678')
+  await voice.register(new Blob(['sample']))
+  await voice.synthesize('你好')
+  const tagged = calls.filter(call => call.headers['X-Journey-Session'] === 'session12345678')
+  assert.ok(tagged.length >= 2)
+  voice.dispose()
+})

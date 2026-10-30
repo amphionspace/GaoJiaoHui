@@ -479,14 +479,17 @@ export function voiceFailureMessage(error) {
 }
 
 export class JourneyVoice {
-  constructor(key) {
+  constructor(key, sessionId = '') {
     this.key = key
+    this.sessionId = sessionId
     this.name = `journey_${crypto.randomUUID().replaceAll('-', '')}`
     this.disposed = false
     this.abort = new AbortController()
   }
   request(path, options = {}) {
-    return api(path, { ...options, prefix: '/api/journey', headers: { 'X-API-Key': this.key, ...options.headers } })
+    const headers = { 'X-API-Key': this.key, ...options.headers }
+    if (this.sessionId) headers['X-Journey-Session'] = this.sessionId
+    return api(path, { ...options, prefix: '/api/journey', headers })
   }
   register(blob) {
     if (this.registration) return this.registration

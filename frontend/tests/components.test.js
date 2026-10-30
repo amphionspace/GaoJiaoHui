@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import vm from 'node:vm'
+import { webcrypto } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { parse, compileScript } from '@vue/compiler-sfc'
 import * as Vue from 'vue'
@@ -65,7 +66,7 @@ async function mount(name, options = {}) {
   }
   const fetch = options.fetch || (async () => new Response(JSON.stringify({ access_token: 'token', voices: ['test-voice'] })))
   const context = vm.createContext({ console, setTimeout, clearTimeout, setInterval, clearInterval, queueMicrotask,
-    Blob, FormData, Response, URL, AbortController, AbortSignal, DOMException, performance, document, window,
+    Blob, FormData, Response, URL, AbortController, AbortSignal, DOMException, performance, document, window, crypto: webcrypto,
     WebSocket: Socket, fetch, localStorage: { getItem: k => storage.get(k), setItem: (k, v) => storage.set(k, v), removeItem: k => storage.delete(k) } })
   const source = await readFile(new URL(`../src/components/${name}.vue`, import.meta.url), 'utf8')
   const { descriptor } = parse(source)

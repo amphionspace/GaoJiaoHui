@@ -117,3 +117,54 @@ class AdminTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AdminSummaryAndAudioTests(unittest.IsolatedAsyncioTestCase):
+    def env(self, directory):
+        return {**ADMIN_ENV, 'JOURNEY_SESSION_LOG': '1',
+                'JOURNEY_SESSION_DB': str(Path(directory) / 'sessions.sqlite3'),
+                'JOURNEY_SESSION_AUDIO_DIR': str(Path(directory) / 'audio'),
+                'JOURNEY_SESSION_AUDIO': '1', 'JOURNEY_ACCESS_KEY': 'test-key'}
+
+    @staticmethod
+    def wav():
+        import io
+        import wave
+        buffer = io.BytesIO()
+        with wave.open(buffer, 'wb') as sample:
+            sample.setnchannels(1)
+            sample.setsampwidth(2)
+            sample.setframerate(24000)
+            sample.writeframes(b'\x00\x00' * 24000)
+        return buffer.getvalue()
+
+    async def test_summary_and_audio_are_protected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict('os.environ', self.env(directory)):
+                session_store.save_audio('c' * 32, 'reply', self.wav())
+                async with client() as api:
+                    denied = await api.get('/api/admin/summary')
+                    summary = await api.get('/api/admin/summary', headers=basic())
+                    audio = await api.get('/api/admin/sessions/' + 'c' * 32 + '/audio/reply', headers=basic())
+                    missing = await api.get('/api/admin/sessions/' + 'c' * 32 + '/audio/sample', headers=basic())
+                    bad_kind = await api.get('/api/admin/sessions/' + 'c' * 32 + '/audio/other', headers=basic())
+        self.assertEqual(denied.status_code, 401)
+        self.assertEqual(summary.status_code, 200)
+        self.assertEqual(summary.json()['audio'], 1)
+        self.assertEqual(audio.status_code, 200)
+        self.assertEqual(audio.headers['content-type'], 'audio/wav')
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(bad_kind.status_code, 404)
+
+    async def test_print_event_marks_the_session(self):
+        request = SimpleNamespace(transcript='我想让爸爸省点力。', topic='future', language='zh')
+        note = SimpleNamespace(note_text='我想让爸爸省点力。', message='你想让爸爸少弯一点腰。', keywords=['爸爸'])
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict('os.environ', self.env(directory)):
+                session_store.record_draft('d' * 32, request, note, 100, 'deepseek-chat')
+                async with client() as api:
+                    response = await api.post('/api/journey/print', headers={'X-API-Key': 'test-key'},
+                                              json={'session_id': 'd' * 32})
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(response.json()['printed'])
+                self.assertEqual(session_store.summary()['printed'], 1)

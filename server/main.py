@@ -35,6 +35,7 @@ from fastapi import FastAPI, Request, Response, HTTPException, Depends
 from starlette.datastructures import UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 try:
     from .journey_text import router as journey_text_router
     from .journey_text import configuration as text_configuration
@@ -309,9 +310,16 @@ async def journey_tts(path: str, request: Request):
             audio_file = form.get("audio_file")
             if not isinstance(voice_name, str) or not isinstance(audio_file, UploadFile):
                 raise HTTPException(400, "请提供音色编号和本人录音。")
+            session_id = request.headers.get("x-journey-session", "")
+            if session_id:
+                sample = await audio_file.read(2 * 1024 * 1024 + 1)
+                await audio_file.seek(0)
+                if 0 < len(sample) <= 2 * 1024 * 1024:
+                    sessions.save_audio(session_id, "sample", sample)
             return await bailian_tts.create_voice(request, voice_name, audio_file)
         if request.method == "POST" and path == "v1/audio/speech":
             audio = await bailian_tts.synthesize(request)
+            sessions.save_audio(request.headers.get("x-journey-session", ""), "reply", audio)
             return Response(content=audio, media_type="audio/wav")
         if request.method == "DELETE" and path.startswith("v1/audio/voices/"):
             return await bailian_tts.delete_voice(request, path.rsplit("/", 1)[-1])
@@ -341,6 +349,31 @@ async def config(request: Request, response: Response):
 async def asr_session():
     metrics_store.event('asr_session')
     return {'url': await managed_asr.session_url()}
+
+
+class PrintEvent(BaseModel):
+    session_id: str = Field(default='', max_length=64, pattern=r'^[0-9a-zA-Z-]*$')
+
+
+@app.post('/api/journey/print', dependencies=[Depends(compose_access)])
+async def journey_print(event: PrintEvent):
+    metrics_store.event('print')
+    return {'printed': sessions.mark_printed(event.session_id)}
+
+
+@app.get('/api/admin/summary', dependencies=[Depends(require_admin)])
+async def admin_summary():
+    return sessions.summary()
+
+
+@app.get('/api/admin/sessions/{session_id}/audio/{kind}', dependencies=[Depends(require_admin)])
+async def admin_session_audio(session_id: str, kind: str):
+    if kind not in ('sample', 'reply'):
+        raise HTTPException(404, '没有这段音频。')
+    path = sessions.audio_path(session_id, kind)
+    if not path:
+        raise HTTPException(404, '没有保存这段音频。')
+    return FileResponse(path, media_type='audio/wav', headers={'Cache-Control': 'no-store'})
 
 
 @app.get('/api/health')
@@ -374,9 +407,10 @@ async def admin_stats():
 async def admin_sessions(limit: int = 30, offset: int = 0):
     limit = max(1, min(int(limit), 100))
     offset = max(0, int(offset))
+    summary = sessions.summary()
     return {
-        'enabled': sessions.enabled(), 'retention_days': sessions.retention_days(),
-        'keep_transcript': sessions.keep_transcript(), 'total': sessions.count(),
+        'enabled': summary['enabled'], 'retention_days': summary['retention_days'],
+        'keep_transcript': sessions.keep_transcript(), 'total': summary['total'], 'audio': summary['audio'],
         'sessions': sessions.recent(limit, offset),
     }
 
@@ -434,6 +468,10 @@ footer{color:var(--dim);font-size:12px;line-height:1.8}
 button{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:7px;padding:7px 14px;cursor:pointer;font-size:12px}
 button:hover{border-color:var(--acc);color:var(--acc)}
 .alert{background:#fbe9e3;border-color:#f0c9bd;color:#8f3b24}
+.metric-value{font-size:34px;font-weight:700;color:#1c6bb0;line-height:1.1}
+.metric-value.bad{color:var(--bad)}
+.session-body audio{width:100%;max-width:420px;height:34px}
+.s-user{font-weight:600;font-size:12px}
 .session-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:10px}
 .session-head h2{margin:0}
 .session-tools{display:flex;align-items:center;gap:10px;color:var(--dim);font-size:11.5px}
@@ -463,6 +501,7 @@ details.session summary .s-meta{color:var(--dim);font-size:11px;white-space:nowr
 </header>
 <main>
   <div id="alert" class="card alert" hidden></div>
+  <section class="cards" id="summary"></section>
   <section class="cards" id="status"></section>
   <div class="grid3">
     <div class="card"><h2>请求</h2><div id="requests"></div></div>
@@ -539,26 +578,52 @@ function render(data) {
     : '<div class="empty">暂无错误。</div>'
 }
 function ms(value) { return value == null ? '-' : (value / 1000).toFixed(1) + 's' }
+const SUMMARY = [['today', '今日体验'], ['total', '总体验'], ['generated', '已生成'], ['printed', '已打印'], ['failed', '异常']]
+function renderSummary(data) {
+  $('summary').innerHTML = SUMMARY.map(([key, label]) =>
+    '<div class="card"><h2>' + label + '</h2><div class="metric-value' + (key === 'failed' && data[key] ? ' bad' : '') + '">' + (data[key] || 0) + '</div></div>').join('')
+}
+async function loadSummary() {
+  try {
+    const response = await fetch('/api/admin/summary', { cache: 'no-store' })
+    if (response.ok) renderSummary(await response.json())
+  } catch (error) { /* keep the previous numbers */ }
+}
+function audioTag(item, kind, label) {
+  return '<div><h4>' + label + '</h4><audio controls preload="none" src="/api/admin/sessions/' +
+    encodeURIComponent(item.id) + '/audio/' + kind + '"></audio></div>'
+}
 function renderSessions(data) {
-  $('session-meta').textContent = data.enabled ? ('共 ' + data.total + ' 条 · 保留 ' + data.retention_days + ' 天') : '未开启'
+  $('session-meta').textContent = data.enabled ? ('共 ' + data.total + ' 条 · 保留 ' + data.retention_days + ' 天 · 音频 ' + (data.audio || 0) + ' 条') : '未开启'
   $('session-note').textContent = data.enabled
-    ? (data.keep_transcript ? '包含讲述原文，仅用于现场复盘；音频不会保存。' : '只保留手记与回信，不保存讲述原文。')
+    ? '会话内容仅用于现场复盘，按保留期自动清理；只保存访客参考音与回信语音，不保存完整录音。'
     : '会话记录未开启：在服务器 /etc/amphion-gjh/session.env 设置 JOURNEY_SESSION_LOG=1 后重启。'
   if (!data.enabled) { $('sessions').innerHTML = '<div class="empty">会话记录未开启。</div>'; return }
   if (!data.sessions.length) { $('sessions').innerHTML = '<div class="empty">还没有会话记录，完成一次讲述后会出现。</div>'; return }
-  $('sessions').innerHTML = data.sessions.map(item =>
-    '<details class="session" data-id="' + esc(item.id) + '"' + (openSessions.has(item.id) ? ' open' : '') + '>' +
-      '<summary><span class="s-time">' + esc(item.created_at.slice(5)) + '</span>' +
+  $('sessions').innerHTML = data.sessions.map(item => {
+    const who = item.visitor_no ? '用户' + item.visitor_no : '访客'
+    const failed = item.status === 'failed'
+    const meta = failed
+      ? '未生成 · ' + esc(item.error_code || '失败')
+      : item.transcript_chars + ' 字 · 草稿 ' + ms(item.draft_ms) + ' · 终版 ' + ms(item.final_ms) +
+        (item.reviewed ? ' · 已审校' : ' · 未审校') + (item.printed_at ? ' · 已打印' : '')
+    return '<details class="session" data-id="' + esc(item.id) + '"' + (openSessions.has(item.id) ? ' open' : '') + '>' +
+      '<summary><span class="s-user">' + esc(who) + '</span>' +
+      '<span class="s-time">' + esc(item.created_at.slice(5)) + '</span>' +
       '<span class="s-topic">' + esc(TOPIC_LABELS[item.topic] || item.topic) + '</span>' +
-      '<span class="s-note">' + esc(item.note_text || '（无手记）') + '</span>' +
-      '<span class="s-meta">' + item.transcript_chars + ' 字 · 草稿 ' + ms(item.draft_ms) + ' · 终版 ' + ms(item.final_ms) + (item.reviewed ? ' · 已审校' : ' · 未审校') + '</span></summary>' +
+      '<span class="s-note">' + esc(failed ? '（未生成）' : (item.note_text || '（无手记）')) + '</span>' +
+      '<span class="s-meta">' + meta + '</span></summary>' +
       '<div class="session-body">' +
         '<div><h4>讲述原文</h4><p>' + esc(item.transcript || '未保存') + '</p></div>' +
         '<div><h4>手记</h4><p>' + esc(item.note_text || '（无）') + '</p></div>' +
         '<div><h4>回信</h4><p>' + esc(item.message || '（无）') + '</p></div>' +
         '<div><h4>关键词</h4><p>' + esc((item.keywords || []).join(' · ') || '（无）') + '</p></div>' +
-        '<div><h4>元信息</h4><p>模型 ' + esc(item.model || '-') + ' · 语言 ' + esc(item.language || '-') + '</p></div>' +
-      '</div></details>').join('')
+        (item.has_sample ? audioTag(item, 'sample', '访客参考音') : '') +
+        (item.has_reply ? audioTag(item, 'reply', '回信语音' + (item.reply_seconds ? '（' + item.reply_seconds + ' 秒）' : '')) : '') +
+        '<div><h4>元信息</h4><p>模型 ' + esc(item.model || '-') + ' · 语言 ' + esc(item.language || '-') +
+          (item.printed_at ? ' · 打印于 ' + esc(item.printed_at) : '') + '</p></div>' +
+      '</div></details>'
+  }).join('')
   document.querySelectorAll('details.session').forEach(node => {
     node.addEventListener('toggle', () => {
       if (node.open) openSessions.add(node.dataset.id)
@@ -591,9 +656,9 @@ $('session-clear').addEventListener('click', async () => {
   const response = await fetch('/api/admin/sessions/clear', { method: 'POST' })
   if (response.ok) { openSessions.clear(); loadSessions() }
 })
-refresh(); loadSessions()
-setInterval(() => { if (!document.hidden) { refresh(); loadSessions() } }, 10000)
-document.addEventListener('visibilitychange', () => { if (!document.hidden) { refresh(); loadSessions() } })
+refresh(); loadSessions(); loadSummary()
+setInterval(() => { if (!document.hidden) { refresh(); loadSessions(); loadSummary() } }, 10000)
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { refresh(); loadSessions(); loadSummary() } })
 </script>
 </body>
 </html>"""
