@@ -142,10 +142,12 @@ class AdminSummaryAndAudioTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             with patch.dict('os.environ', self.env(directory)):
                 session_store.save_audio('c' * 32, 'reply', self.wav())
+                session_store.save_audio('c' * 32, 'visit', self.wav())
                 async with client() as api:
                     denied = await api.get('/api/admin/summary')
                     summary = await api.get('/api/admin/summary', headers=basic())
                     audio = await api.get('/api/admin/sessions/' + 'c' * 32 + '/audio/reply', headers=basic())
+                    visit = await api.get('/api/admin/sessions/' + 'c' * 32 + '/audio/visit', headers=basic())
                     missing = await api.get('/api/admin/sessions/' + 'c' * 32 + '/audio/sample', headers=basic())
                     bad_kind = await api.get('/api/admin/sessions/' + 'c' * 32 + '/audio/other', headers=basic())
         self.assertEqual(denied.status_code, 401)
@@ -153,6 +155,7 @@ class AdminSummaryAndAudioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary.json()['audio'], 1)
         self.assertEqual(audio.status_code, 200)
         self.assertEqual(audio.headers['content-type'], 'audio/wav')
+        self.assertEqual(visit.status_code, 200)
         self.assertEqual(missing.status_code, 404)
         self.assertEqual(bad_kind.status_code, 404)
 

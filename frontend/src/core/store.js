@@ -8,6 +8,8 @@ const savedLocale = localStorage.getItem('amphion_locale')
 export const store = reactive({
   apiKey: localStorage.getItem('amphion_key') || '',
   asrManaged: false,
+  sessionLog: false,
+  sessionRetentionDays: 7,
   locale: queryLocale === 'en' || queryLocale === 'zh' ? queryLocale : savedLocale === 'en' ? 'en' : 'zh',
   demoMode: true,
   logs: []           // { time, msg, cls }

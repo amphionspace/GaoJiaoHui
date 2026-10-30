@@ -31,8 +31,10 @@ from urllib.parse import urlsplit
 import httpx
 import httpcore
 from httpcore._backends.anyio import AnyIOBackend
-from fastapi import FastAPI, Request, Response, HTTPException, Depends
+from fastapi import FastAPI, Request, Response, HTTPException, Depends, File, Form
+from fastapi import UploadFile as APIUploadFile
 from starlette.datastructures import UploadFile
+
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -342,7 +344,8 @@ async def config(request: Request, response: Response):
     if managed_asr.enabled():
         managed_asr.issue_cookie(request, response)
     return {"upstream": UPSTREAM, "asrManaged": managed_asr.enabled(),
-            "wsHost": ASR_WS_URL, "wsLegacy": ASR_REALTIME_WS_URL}
+            "wsHost": ASR_WS_URL, "wsLegacy": ASR_REALTIME_WS_URL,
+            "sessionLog": sessions.enabled(), "sessionRetentionDays": sessions.retention_days()}
 
 
 @app.post('/api/journey/asr-session', dependencies=[Depends(compose_access)])
@@ -361,6 +364,17 @@ async def journey_print(event: PrintEvent):
     return {'printed': sessions.mark_printed(event.session_id)}
 
 
+@app.post('/api/journey/audio', dependencies=[Depends(compose_access)])
+async def journey_audio(audio_file: APIUploadFile = File(...), session_id: str = Form('')):
+    raw = await audio_file.read(8 * 1024 * 1024 + 1)
+    if len(raw) > 8 * 1024 * 1024:
+        raise HTTPException(413, '录音文件过大。')
+    if not raw.startswith(b'RIFF') or b'WAVE' not in raw[:16]:
+        raise HTTPException(400, '请提供 WAV 格式的录音。')
+    seconds = sessions.save_audio(session_id, 'visit', raw)
+    return {'stored': bool(seconds), 'seconds': seconds}
+
+
 @app.get('/api/admin/summary', dependencies=[Depends(require_admin)])
 async def admin_summary():
     return sessions.summary()
@@ -368,7 +382,7 @@ async def admin_summary():
 
 @app.get('/api/admin/sessions/{session_id}/audio/{kind}', dependencies=[Depends(require_admin)])
 async def admin_session_audio(session_id: str, kind: str):
-    if kind not in ('sample', 'reply'):
+    if kind not in ('sample', 'reply', 'visit'):
         raise HTTPException(404, '没有这段音频。')
     path = sessions.audio_path(session_id, kind)
     if not path:
@@ -596,7 +610,7 @@ function audioTag(item, kind, label) {
 function renderSessions(data) {
   $('session-meta').textContent = data.enabled ? ('共 ' + data.total + ' 条 · 保留 ' + data.retention_days + ' 天 · 音频 ' + (data.audio || 0) + ' 条') : '未开启'
   $('session-note').textContent = data.enabled
-    ? '会话内容仅用于现场复盘，按保留期自动清理；只保存访客参考音与回信语音，不保存完整录音。'
+    ? '会话内容与音频仅用于现场复盘，按保留期自动清理；包含访客录音、参考音与回信语音。'
     : '会话记录未开启：在服务器 /etc/amphion-gjh/session.env 设置 JOURNEY_SESSION_LOG=1 后重启。'
   if (!data.enabled) { $('sessions').innerHTML = '<div class="empty">会话记录未开启。</div>'; return }
   if (!data.sessions.length) { $('sessions').innerHTML = '<div class="empty">还没有会话记录，完成一次讲述后会出现。</div>'; return }
@@ -618,6 +632,7 @@ function renderSessions(data) {
         '<div><h4>手记</h4><p>' + esc(item.note_text || '（无）') + '</p></div>' +
         '<div><h4>回信</h4><p>' + esc(item.message || '（无）') + '</p></div>' +
         '<div><h4>关键词</h4><p>' + esc((item.keywords || []).join(' · ') || '（无）') + '</p></div>' +
+        (item.has_visit ? audioTag(item, 'visit', '访客录音' + (item.visit_seconds ? '（' + item.visit_seconds + ' 秒）' : '')) : '') +
         (item.has_sample ? audioTag(item, 'sample', '访客参考音') : '') +
         (item.has_reply ? audioTag(item, 'reply', '回信语音' + (item.reply_seconds ? '（' + item.reply_seconds + ' 秒）' : '')) : '') +
         '<div><h4>元信息</h4><p>模型 ' + esc(item.model || '-') + ' · 语言 ' + esc(item.language || '-') +

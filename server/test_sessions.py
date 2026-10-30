@@ -152,3 +152,27 @@ class VisitorBackfillTests(unittest.TestCase):
                 rows = {row['id']: row['visitor_no'] for row in sessions.recent()}
                 self.assertEqual(rows['a' * 32], 1)
                 self.assertEqual(rows['b' * 32], 2)
+
+
+class VisitAudioTests(unittest.TestCase):
+    def test_the_full_visit_recording_is_stored_as_its_own_kind(self):
+        import io
+        import wave
+
+        buffer = io.BytesIO()
+        with wave.open(buffer, 'wb') as sample:
+            sample.setnchannels(1)
+            sample.setsampwidth(2)
+            sample.setframerate(16000)
+            sample.writeframes(b'\x00\x00' * 16000)
+        with tempfile.TemporaryDirectory() as directory:
+            env = {'JOURNEY_SESSION_LOG': '1', 'JOURNEY_SESSION_DB': str(Path(directory) / 's.sqlite3'),
+                   'JOURNEY_SESSION_AUDIO_DIR': str(Path(directory) / 'audio'), 'JOURNEY_SESSION_AUDIO': '1'}
+            with patch.dict('os.environ', env):
+                seconds = sessions.save_audio('e' * 32, 'visit', buffer.getvalue())
+                self.assertEqual(seconds, 1.0)
+                row = sessions.recent()[0]
+                self.assertTrue(row['has_visit'])
+                self.assertEqual(row['visit_seconds'], 1.0)
+                self.assertTrue(sessions.audio_path('e' * 32, 'visit'))
+                self.assertEqual(sessions.summary()['audio'], 1)

@@ -71,6 +71,8 @@ COLUMNS = {
     'sample_audio': 'TEXT',
     'reply_audio': 'TEXT',
     'reply_seconds': 'REAL',
+    'visit_audio': 'TEXT',
+    'visit_seconds': 'REAL',
 }
 
 
@@ -163,7 +165,7 @@ def _orphan_audio(connection):
 
 
 def _delete_audio_files(session_id):
-    for kind in ('sample', 'reply'):
+    for kind in ('sample', 'reply', 'visit'):
         try:
             (audio_dir() / f'{session_id}.{kind}.wav').unlink()
         except OSError:
@@ -173,13 +175,13 @@ def _delete_audio_files(session_id):
 def _trim_audio(connection):
     rows = connection.execute(
         'SELECT id FROM sessions WHERE sample_audio IS NOT NULL OR reply_audio IS NOT NULL '
-        'ORDER BY created_at DESC LIMIT -1 OFFSET ?', (max_audio(),)
+        'OR visit_audio IS NOT NULL ORDER BY created_at DESC LIMIT -1 OFFSET ?', (max_audio(),)
     ).fetchall()
     for row in rows:
         _delete_audio_files(row['id'])
         connection.execute(
-            'UPDATE sessions SET sample_audio = NULL, reply_audio = NULL, reply_seconds = NULL WHERE id = ?',
-            (row['id'],),
+            'UPDATE sessions SET sample_audio = NULL, reply_audio = NULL, reply_seconds = NULL, '
+            'visit_audio = NULL, visit_seconds = NULL WHERE id = ?', (row['id'],)
         )
 
 
@@ -269,7 +271,7 @@ def _wav_seconds(raw):
 
 
 def save_audio(session_id, kind, raw):
-    if kind not in ('sample', 'reply') or not enabled() or not audio_enabled():
+    if kind not in ('sample', 'reply', 'visit') or not enabled() or not audio_enabled():
         return 0.0
     if not SESSION_ID.fullmatch(session_id or '') or not raw or len(raw) > MAX_AUDIO_BYTES:
         return 0.0
@@ -288,12 +290,19 @@ def save_audio(session_id, kind, raw):
                     VALUES (?, ?, ?, 'pending', ?)
                     ON CONFLICT(id) DO UPDATE SET sample_audio = excluded.sample_audio
                 """, (session_id, created, visitor_no, str(path)))
-            else:
+            elif kind == 'reply':
                 connection.execute("""
                     INSERT INTO sessions (id, created_at, visitor_no, status, reply_audio, reply_seconds)
                     VALUES (?, ?, ?, 'pending', ?, ?)
                     ON CONFLICT(id) DO UPDATE SET reply_audio = excluded.reply_audio,
                         reply_seconds = excluded.reply_seconds
+                """, (session_id, created, visitor_no, str(path), seconds))
+            else:
+                connection.execute("""
+                    INSERT INTO sessions (id, created_at, visitor_no, status, visit_audio, visit_seconds)
+                    VALUES (?, ?, ?, 'pending', ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET visit_audio = excluded.visit_audio,
+                        visit_seconds = excluded.visit_seconds
                 """, (session_id, created, visitor_no, str(path), seconds))
             _trim_audio(connection)
         return seconds
@@ -307,9 +316,9 @@ def save_audio(session_id, kind, raw):
 
 
 def audio_path(session_id, kind):
-    if kind not in ('sample', 'reply') or not enabled() or not SESSION_ID.fullmatch(session_id or ''):
+    if kind not in ('sample', 'reply', 'visit') or not enabled() or not SESSION_ID.fullmatch(session_id or ''):
         return ''
-    column = 'sample_audio' if kind == 'sample' else 'reply_audio'
+    column = {'sample': 'sample_audio', 'reply': 'reply_audio', 'visit': 'visit_audio'}[kind]
     with _connection() as connection:
         row = connection.execute(f'SELECT {column} FROM sessions WHERE id = ?', (session_id,)).fetchone()
     if not row or not row[0]:
@@ -338,6 +347,8 @@ def _row(row):
         'has_sample': bool(row['sample_audio']) if 'sample_audio' in keys else False,
         'has_reply': bool(row['reply_audio']) if 'reply_audio' in keys else False,
         'reply_seconds': row['reply_seconds'] if 'reply_seconds' in keys else None,
+        'has_visit': bool(row['visit_audio']) if 'visit_audio' in keys else False,
+        'visit_seconds': row['visit_seconds'] if 'visit_seconds' in keys else None,
     }
 
 
@@ -372,7 +383,8 @@ def summary():
             'printed': connection.execute('SELECT COUNT(*) FROM sessions WHERE printed_at IS NOT NULL').fetchone()[0],
             'failed': connection.execute("SELECT COUNT(*) FROM sessions WHERE status = 'failed'").fetchone()[0],
             'audio': connection.execute(
-                'SELECT COUNT(*) FROM sessions WHERE sample_audio IS NOT NULL OR reply_audio IS NOT NULL').fetchone()[0],
+                'SELECT COUNT(*) FROM sessions WHERE sample_audio IS NOT NULL OR reply_audio IS NOT NULL '
+                'OR visit_audio IS NOT NULL').fetchone()[0],
         })
     return base
 

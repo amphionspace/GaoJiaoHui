@@ -8,6 +8,8 @@ import { store } from './store.js'
    click that starts listening does not pay for it; 40 s keeps 20 s of headroom
    for the WebSocket handshake. */
 const SESSION_REUSE_MS = 40000
+// The visit recording is uploaded for the ops dashboard; cap memory and upload size.
+const MAX_VISIT_SECONDS = 120
 let preparedSession = null
 let sessionPending = null
 
@@ -62,6 +64,13 @@ export class JourneyRecorder {
     this.context = context
     this.pendingPcm = new Int16Array(8000)
     this.pendingSamples = 0
+    this.recorded = []
+    this.recordedSeconds = 0
+  }
+
+  visitAudio() {
+    if (!this.recorded.length || this.recordedSeconds < 1) return null
+    return wavEncode(this.recorded)
   }
 
   acceptSegment(message) {
@@ -196,6 +205,10 @@ export class JourneyRecorder {
     try {
       await this.mic.start(pcm => {
         if (this.closed || socket.readyState !== WebSocket.OPEN) return
+        if (this.recordedSeconds < MAX_VISIT_SECONDS) {
+          this.recorded.push(pcm.slice())
+          this.recordedSeconds += pcm.length / SR
+        }
         if (++this.queuedChunks > 24) { this.fail('音频处理跟不上录音，请关闭其他占用较高的程序后重试。'); return }
         this.processing = this.processing.then(async () => {
           if (!this.closed) await this.detector.process(pcm, this.acceptAudio)

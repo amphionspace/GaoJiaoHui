@@ -728,3 +728,17 @@ test('voice requests carry the visit session id for the admin audio', async () =
   assert.ok(tagged.length >= 2)
   voice.dispose()
 })
+
+test('the recorder keeps the visit recording for the dashboard', async () => {
+  const { JourneyRecorder, Socket, Mic } = await audioModule(async () => managedSession, { managed: true })
+  const recorder = new JourneyRecorder('')
+  const starting = recorder.start()
+  await new Promise(resolve => setImmediate(resolve))
+  Socket.latest.receive({ type: 'Begin' })
+  await starting
+  Mic.latest.callback(new Int16Array(16000))
+  await recorder.processing
+  const blob = recorder.visitAudio()
+  assert.ok(blob && blob.size > 0)
+  recorder.stop()
+})

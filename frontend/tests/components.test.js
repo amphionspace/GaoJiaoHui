@@ -27,6 +27,7 @@ async function mount(name, options = {}) {
       if (options.recorderFinal) this.handlers.onText(options.recorderFinal)
     }
     stop() { this.stopped = true }
+    visitAudio() { return new Blob(['visit']) }
   }
   class Mic {
     constructor() { mics.push(this) }

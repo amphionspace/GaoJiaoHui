@@ -85,6 +85,15 @@ function currentSession() {
   if (!visitSession) visitSession = crypto.randomUUID().replaceAll('-', '')
   return visitSession
 }
+function uploadVisitAudio(blob, sessionId) {
+  if (!blob || !sessionId) return
+  const data = new FormData()
+  data.append('session_id', sessionId)
+  data.append('audio_file', blob, sessionId + '.wav')
+  fetch('/api/journey/audio', {
+    method: 'POST', headers: { 'X-API-Key': store.apiKey }, body: data,
+  }).catch(() => {})
+}
 function reportPrint(sessionId) {
   if (!sessionId) return
   fetch('/api/journey/print', {
@@ -234,6 +243,7 @@ async function finishStory() {
   try {
     if (current) await current.finish()
     if (id !== session) return
+    uploadVisitAudio(current?.visitAudio?.(), currentSession())
     stopRecording()
     const fullTranscript = text.value
     const content = (endingIntent(fullTranscript)?.text ?? fullTranscript).trim()
@@ -428,7 +438,7 @@ onBeforeUnmount(() => {
         <p class="journey-tagline">不用想好答案，从一个小小的愿望开始。</p>
         <div class="journey-home-actions"><button class="journey-primary call-start" @click="beginJourney">开始体验<JourneyIcon name="ArrowRight" /></button></div>
         <label class="journey-consent"><input type="checkbox" v-model="voiceEnabled" />用我的声音，听见未来的回信（可选）</label>
-        <p class="privacy-note">默认只转写讲述。勾选后才会尝试采集本人音色；<br />声音暂不可用时，仍可生成文字手记。</p>
+        <p class="privacy-note">默认只转写讲述。勾选后才会尝试采集本人音色；<br />声音暂不可用时，仍可生成文字手记。<template v-if="store.sessionLog"><br />讲述与声音仅用于现场复盘，{{ store.sessionRetentionDays }} 天后自动删除。</template></p>
       </div>
     </template>
     <div v-else-if="stage === 'intro'" class="journey-intro">

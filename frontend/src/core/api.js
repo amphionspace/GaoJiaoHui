@@ -18,6 +18,8 @@ export async function loadRuntimeConfig() {
   }
   WS_HOST = config.wsHost; WS_HOST_LEGACY = config.wsLegacy
   store.asrManaged = config.asrManaged === true
+  store.sessionLog = config.sessionLog === true
+  store.sessionRetentionDays = Number(config.sessionRetentionDays) || 7
 }
 
 export function boundedFetch(url, options = {}, timeout = 30000) {
