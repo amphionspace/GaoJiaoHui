@@ -16,7 +16,11 @@
     python3 server/main.py            # 后端 8766
     cd frontend && npm run dev        # Vite 5173，/proxy 自动转发到 8766
 """
+import base64
 import os
+import secrets
+import shutil
+import time
 import typing
 import logging
 import mimetypes
@@ -29,17 +33,21 @@ import httpcore
 from httpcore._backends.anyio import AnyIOBackend
 from fastapi import FastAPI, Request, Response, HTTPException, Depends
 from starlette.datastructures import UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 try:
     from .journey_text import router as journey_text_router
+    from .journey_text import configuration as text_configuration
     from .journey_image import router as journey_image_router
     from .security import RequestLimits, compose_access
+    from .metrics import metrics as metrics_store
     from . import bailian_tts, managed_asr
 except ImportError:
     from journey_text import router as journey_text_router
+    from journey_text import configuration as text_configuration
     from journey_image import router as journey_image_router
     from security import RequestLimits, compose_access
+    from metrics import metrics as metrics_store
     import bailian_tts, managed_asr
 
 UPSTREAM = os.environ.get('GATEWAY_URL', 'https://amphion.top').rstrip('/')
@@ -160,6 +168,112 @@ async def response_headers(request, call_next):
     return response
 
 
+@app.middleware('http')
+async def collect_metrics(request, call_next):
+    """Aggregate API latency/status only; admin, metrics and health polls skip it."""
+    path = request.url.path
+    if not (path.startswith('/api/') or path.startswith('/proxy/')):
+        return await call_next(request)
+    if path.startswith(('/api/admin', '/api/health')):
+        return await call_next(request)
+    started = time.perf_counter()
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        return response
+    finally:
+        metrics_store.request(path, status, time.perf_counter() - started)
+
+
+def frontend_check():
+    built = os.path.isfile(os.path.join(DIST, 'index.html'))
+    return {'ok': built, 'built': built}
+
+
+def text_check():
+    try:
+        config = text_configuration()
+        configured = bool(config.get('url') and config.get('model'))
+        return {'ok': configured, 'model': config.get('model') or ''}
+    except Exception:  # HTTPException from an unreadable config file.
+        return {'ok': False, 'model': ''}
+
+
+def asr_check():
+    managed = managed_asr.enabled()
+    if not managed:
+        return {'ok': True, 'managed': False, 'detail': 'gateway key'}
+    try:
+        managed_asr.configuration()
+        return {'ok': True, 'managed': True}
+    except Exception:
+        return {'ok': False, 'managed': True}
+
+
+def tts_check():
+    provider = os.environ.get('JOURNEY_TTS_PROVIDER', 'legacy').strip().lower() or 'legacy'
+    if not bailian_tts.enabled():
+        return {'ok': True, 'provider': provider, 'detail': 'gateway'}
+    try:
+        bailian_tts.configuration()
+        return {'ok': True, 'provider': provider}
+    except Exception:
+        return {'ok': False, 'provider': provider}
+
+
+def disk_check():
+    usage = shutil.disk_usage(ROOT)
+    percent = usage.used / usage.total * 100
+    return {'ok': percent < 95, 'percent': round(percent, 1), 'free_gb': round(usage.free / 1e9, 1)}
+
+
+def health_checks():
+    return {
+        'frontend': frontend_check(),
+        'text': text_check(),
+        'asr': asr_check(),
+        'tts': tts_check(),
+        'disk': disk_check(),
+    }
+
+
+def health_status(checks):
+    return 'ok' if all(item['ok'] for item in checks.values()) else 'degraded'
+
+
+def admin_credentials():
+    return os.environ.get('JOURNEY_ADMIN_USER', '').strip(), os.environ.get('JOURNEY_ADMIN_PASSWORD', '')
+
+
+def _auth_error(detail='需要后台账号。'):
+    return HTTPException(401, detail, headers={'WWW-Authenticate': 'Basic realm="journey-admin"'})
+
+def require_admin(request: Request):
+    user, password = admin_credentials()
+    if not user or not password:
+        raise HTTPException(503, '后台未启用：请配置 JOURNEY_ADMIN_USER 与 JOURNEY_ADMIN_PASSWORD。')
+    allowed = [ip.strip() for ip in os.environ.get('JOURNEY_ADMIN_IPS', '').split(',') if ip.strip()]
+    if allowed:
+        peer = request.client.host if request.client else ''
+        forwarded = request.headers.get('x-forwarded-for', '').split(',')[0].strip()
+        # Only trust the forwarding header when the direct peer is the local proxy.
+        source = (forwarded or peer) if peer in ('127.0.0.1', '::1') else peer
+        if source not in allowed:
+            raise HTTPException(403, '后台只允许指定来源访问。')
+    header = request.headers.get('authorization', '')
+    if not header.lower().startswith('basic '):
+        raise _auth_error('请输入后台账号。')
+    try:
+        decoded = base64.b64decode(header.split(' ', 1)[1], validate=True).decode('utf-8')
+    except (ValueError, UnicodeDecodeError):
+        raise _auth_error('后台账号无效。') from None
+    got_user, _, got_password = decoded.partition(':')
+    if not (secrets.compare_digest(got_user, user) and secrets.compare_digest(got_password, password)):
+        raise _auth_error('账号或密码不正确。')
+    return got_user
+
+
 @app.api_route("/proxy/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
 async def proxy(path: str, request: Request):
     use_ip = UPSTREAM_IP or (LEGACY_TTS_IP if path.startswith(("tts/", "journey-tts/", "asr/health")) else "")
@@ -225,12 +339,190 @@ async def config(request: Request, response: Response):
 
 @app.post('/api/journey/asr-session', dependencies=[Depends(compose_access)])
 async def asr_session():
+    metrics_store.event('asr_session')
     return {'url': await managed_asr.session_url()}
 
 
 @app.get('/api/health')
 async def health():
-    return {'status': 'ok', 'scope': 'application', 'version': VERSION, 'frontend_built': os.path.isfile(os.path.join(DIST, 'index.html'))}
+    checks = health_checks()
+    snapshot = metrics_store.snapshot()
+    return {
+        'status': health_status(checks), 'scope': 'application', 'version': VERSION,
+        'release': os.path.basename(ROOT), 'frontend_built': checks['frontend']['built'],
+        'uptime_seconds': snapshot['uptime_seconds'], 'checks': checks,
+        'stats': {
+            'requests_total': snapshot['requests']['total'],
+            'errors_total': snapshot['requests']['errors'],
+            'recent': snapshot['requests']['recent'],
+        },
+    }
+
+
+@app.get('/api/admin/stats', dependencies=[Depends(require_admin)])
+async def admin_stats():
+    checks = health_checks()
+    snapshot = metrics_store.snapshot()
+    return {
+        'release': os.path.basename(ROOT), 'version': VERSION, 'status': health_status(checks),
+        'processed_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+        'uptime_seconds': snapshot['uptime_seconds'], 'checks': checks, 'stats': snapshot,
+    }
+
+
+@app.get('/metrics', dependencies=[Depends(require_admin)])
+async def prometheus_metrics():
+    checks = health_checks()
+    body = metrics_store.prometheus()
+    for name, check in checks.items():
+        body += f'journey_health_ok{{check="{name}"}} {1 if check["ok"] else 0}\n'
+    body += f'journey_disk_used_ratio {checks["disk"]["percent"] / 100}\n'
+    return PlainTextResponse(body, media_type='text/plain; version=0.0.4')
+
+
+ADMIN_PAGE = """<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>运维看板 · 和 2036 对话</title>
+<style>
+:root{--bg:#f6f3ec;--panel:#fff;--line:#e3ddd0;--ink:#2a3e35;--dim:#7c8a83;--acc:#305b4b;--ok:#2f8f5b;--bad:#c4553b}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:baseline;justify-content:space-between;padding:18px 24px;background:var(--panel);border-bottom:1px solid var(--line)}
+header h1{font-size:16px;margin:0;display:flex;gap:10px;align-items:baseline}
+header h1 small{font-weight:400;color:var(--dim);font-size:12px}
+.meta{display:flex;gap:16px;color:var(--dim);font-size:12px;flex-wrap:wrap;align-items:center}
+main{max-width:1180px;margin:0 auto;padding:20px 24px 40px;display:grid;gap:16px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.card h2{margin:0 0 10px;font-size:12px;font-weight:600;color:var(--dim);letter-spacing:.06em}
+.chip{display:flex;align-items:center;gap:8px;font-size:13px}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--dim);flex:none}
+.dot.ok{background:var(--ok)}.dot.bad{background:var(--bad)}
+.chip .detail{color:var(--dim);font-size:11px;margin-left:auto;text-align:right}
+.grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
+.num{display:flex;justify-content:space-between;gap:12px;padding:4px 0;border-bottom:1px dashed var(--line);font-size:13px}
+.num:last-child{border-bottom:0}
+.num b{font-variant-numeric:tabular-nums;font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{text-align:left;padding:7px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--dim);font-weight:500}
+td.path{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;white-space:normal;word-break:break-all}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+.empty{color:var(--dim);padding:10px 0;font-size:12.5px}
+.note{color:var(--dim);font-size:11.5px;margin-top:8px}
+footer{color:var(--dim);font-size:12px;line-height:1.8}
+button{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:7px;padding:7px 14px;cursor:pointer;font-size:12px}
+button:hover{border-color:var(--acc);color:var(--acc)}
+.alert{background:#fbe9e3;border-color:#f0c9bd;color:#8f3b24}
+@media (max-width:640px){header{padding:14px 16px}main{padding:14px 16px 32px}}
+</style>
+</head>
+<body>
+<header>
+  <h1>和 2036 对话 <small>运维看板</small></h1>
+  <div class="meta">
+    <span id="meta-release">-</span><span id="meta-version">-</span>
+    <span id="meta-uptime">-</span><span id="meta-updated">-</span>
+    <button id="refresh" type="button">立即刷新</button>
+  </div>
+</header>
+<main>
+  <div id="alert" class="card alert" hidden></div>
+  <section class="cards" id="status"></section>
+  <div class="grid3">
+    <div class="card"><h2>请求</h2><div id="requests"></div></div>
+    <div class="card"><h2>旅程阶段</h2><div id="events"></div></div>
+    <div class="card"><h2>阶段时延</h2><div id="latency"></div></div>
+  </div>
+  <section class="card"><h2>接口</h2><div id="paths"></div><p class="note">流式接口（compose/stream）的时延为首字节时间；草稿与终版的实际时延见上方“阶段时延”。</p></section>
+  <section class="card"><h2>最近错误</h2><div id="errors"></div></section>
+  <footer>仅统计聚合数据，不记录讲述、音频或密钥；计数自服务启动。企业微信告警由 journey-monitor.timer 每分钟检查并推送。</footer>
+</main>
+<script>
+const $ = id => document.getElementById(id)
+const esc = value => String(value == null ? '' : value).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+const dot = ok => '<span class="dot ' + (ok ? 'ok' : 'bad') + '"></span>'
+const CHECK_LABELS = { frontend: '前端构建', text: '文本模型', asr: '语音识别', tts: '声音合成', disk: '磁盘' }
+const EVENT_LABELS = { compose_draft: '草稿上屏', compose_final: '审校完成', compose_review_fallback: '审校回退', compose_error: '整理失败', asr_session: '语音会话', illustrate: '插画请求', illustrate_error: '插画失败' }
+const LATENCY_LABELS = { compose_draft_seconds: '草稿时延', compose_final_seconds: '终版时延' }
+function detail(name, check) {
+  if (name === 'text') return check.model || ''
+  if (name === 'tts') return check.provider || ''
+  if (name === 'disk') return (check.percent || 0) + '% · 剩余 ' + (check.free_gb || 0) + 'G'
+  if (name === 'asr') return check.managed ? '托管凭证' : '网关密钥'
+  return check.built === false ? '未构建' : ''
+}
+function uptime(seconds) {
+  if (seconds == null) return '-'
+  const days = Math.floor(seconds / 86400), hours = Math.floor(seconds % 86400 / 3600), minutes = Math.floor(seconds % 3600 / 60)
+  if (days) return '已运行 ' + days + ' 天 ' + hours + ' 小时'
+  if (hours) return '已运行 ' + hours + ' 小时 ' + minutes + ' 分'
+  return '已运行 ' + minutes + ' 分'
+}
+function render(data) {
+  $('meta-release').textContent = data.release || ''
+  $('meta-version').textContent = 'v' + (data.version || '')
+  $('meta-uptime').textContent = uptime(data.uptime_seconds)
+  $('meta-updated').textContent = '更新于 ' + (data.processed_at || '')
+  const overall = data.status === 'ok'
+  $('status').innerHTML = '<div class="card"><h2>服务</h2><div class="chip">' + dot(overall) + '<span>' + (overall ? '全部正常' : '有异常项') + '</span></div></div>' +
+    Object.entries(data.checks || {}).map(([name, check]) =>
+      '<div class="card"><h2>' + esc(CHECK_LABELS[name] || name) + '</h2><div class="chip">' + dot(check.ok) +
+      '<span>' + (check.ok ? '正常' : '异常') + '</span><span class="detail">' + esc(detail(name, check)) + '</span></div></div>').join('')
+  const requests = data.stats.requests
+  $('requests').innerHTML =
+    '<div class="num"><span>请求总数</span><b>' + requests.total + '</b></div>' +
+    '<div class="num"><span>5xx 错误</span><b>' + requests.errors + '</b></div>' +
+    '<div class="num"><span>最近 5 分钟</span><b>' + requests.recent.total + '</b></div>' +
+    '<div class="num"><span>最近 5 分钟错误</span><b>' + requests.recent.errors + '</b></div>'
+  const events = Object.entries(data.stats.events || {})
+  $('events').innerHTML = events.length
+    ? events.map(([name, count]) => '<div class="num"><span>' + esc(EVENT_LABELS[name] || name) + '</span><b>' + count + '</b></div>').join('')
+    : '<div class="empty">服务启动后还没有阶段事件。</div>'
+  const observations = Object.entries(data.stats.observations || {})
+  $('latency').innerHTML = observations.length
+    ? observations.map(([name, series]) => '<div class="num"><span>' + esc(LATENCY_LABELS[name] || name) + '</span><b>' + Math.round(series.p50_ms) + ' / ' + Math.round(series.p95_ms) + ' ms</b></div>').join('')
+    : '<div class="empty">还没有可用的阶段时延。</div>'
+  const paths = data.stats.paths || []
+  $('paths').innerHTML = paths.length
+    ? '<table><thead><tr><th>接口</th><th class="num">次数</th><th class="num">5xx</th><th class="num">P50</th><th class="num">P95</th></tr></thead><tbody>' +
+      paths.map(item => '<tr><td class="path">' + esc(item.path) + '</td><td class="num">' + item.count + '</td><td class="num">' + item.errors +
+        '</td><td class="num">' + Math.round(item.p50_ms) + ' ms</td><td class="num">' + Math.round(item.p95_ms) + ' ms</td></tr>').join('') + '</tbody></table>'
+    : '<div class="empty">暂无接口请求。</div>'
+  const errors = data.stats.errors || []
+  $('errors').innerHTML = errors.length
+    ? '<table><thead><tr><th>时间</th><th>接口</th><th class="num">状态</th><th>代码</th></tr></thead><tbody>' +
+      errors.map(item => '<tr><td>' + esc(item.at) + '</td><td class="path">' + esc(item.path) + '</td><td class="num">' + item.status +
+        '</td><td>' + esc(item.code) + '</td></tr>').join('') + '</tbody></table>'
+    : '<div class="empty">暂无错误。</div>'
+}
+async function refresh() {
+  try {
+    const response = await fetch('/api/admin/stats', { cache: 'no-store' })
+    if (!response.ok) throw new Error('HTTP ' + response.status)
+    render(await response.json())
+    $('alert').hidden = true
+  } catch (error) {
+    const box = $('alert')
+    box.hidden = false
+    box.textContent = '看板数据读取失败：' + error.message + '。若刚修改过后台密码，请关闭浏览器后重新登录。'
+  }
+}
+$('refresh').addEventListener('click', refresh)
+refresh()
+setInterval(() => { if (!document.hidden) refresh() }, 10000)
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh() })
+</script>
+</body>
+</html>"""
+
+
+@app.get('/admin', dependencies=[Depends(require_admin)])
+async def admin_page():
+    return HTMLResponse(ADMIN_PAGE, headers={'Cache-Control': 'no-store'})
 
 
 if os.path.isdir(DIST):

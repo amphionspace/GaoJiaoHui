@@ -11,9 +11,11 @@ from pydantic import BaseModel, Field
 try:
     from .bailian_tts import configuration, _headers
     from .security import compose_access
+    from .metrics import metrics
 except ImportError:
     from bailian_tts import configuration, _headers
     from security import compose_access
+    from metrics import metrics
 
 router = APIRouter(prefix='/api/journey')
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
@@ -129,10 +131,18 @@ async def _generate_sketch(summary):
 
 
 async def generate_sketch(summary):
+    metrics.event('illustrate')
     try:
         return await asyncio.wait_for(_generate_sketch(summary), timeout=100)
     except asyncio.TimeoutError:
+        metrics.event('illustrate_error')
+        metrics.error('/api/journey/illustrate', 504, 'illustration_timeout')
         raise HTTPException(504, '插画生成超时，文字手记已保留。') from None
+    except HTTPException as error:
+        metrics.event('illustrate_error')
+        detail = error.detail if isinstance(error.detail, str) else ''
+        metrics.error('/api/journey/illustrate', error.status_code, detail[:40])
+        raise
 
 
 @router.post('/illustrate', dependencies=[Depends(compose_access)])

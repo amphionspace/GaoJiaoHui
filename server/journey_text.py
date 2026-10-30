@@ -13,8 +13,10 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 try:
     from .security import compose_access
+    from .metrics import metrics
 except ImportError:
     from security import compose_access
+    from metrics import metrics
 
 router = APIRouter(prefix="/api/journey")
 CONFIG_FILE = Path(__file__).resolve().parents[1] / ".env.journey.json"
@@ -256,6 +258,7 @@ async def compose_notes(request, config=None):
     and their retry behaviour stay in one place.
     """
     config = config or compose_configuration(request)
+    started = time.monotonic()
     headers = {"Authorization": "Bearer " + config["api_key"]} if config["api_key"] else {}
     english = request.language == "en"
     messages = [
@@ -289,6 +292,8 @@ async def compose_notes(request, config=None):
             try:
                 content = response.json()["choices"][0]["message"]["content"]
                 note = parse_note(content, request.transcript, request.language)
+                metrics.event("compose_draft")
+                metrics.observe("compose_draft_seconds", time.monotonic() - started)
                 yield "draft", note, config
                 # A separate editorial pass checks meaning, which length/anchor checks cannot establish.
                 reviewed = await post({
@@ -301,6 +306,8 @@ async def compose_notes(request, config=None):
                 if reviewed.status_code >= 400:
                     raise HTTPException(502, detail={"code": "text_review_failed", "message": "回信审校暂时不可用，讲述已保留，请重试。"})
                 reviewed_note = parse_note(reviewed.json()["choices"][0]["message"]["content"], request.transcript, request.language)
+                metrics.event("compose_final")
+                metrics.observe("compose_final_seconds", time.monotonic() - started)
                 yield "final", reviewed_note, config
                 return
             except (KeyError, IndexError, TypeError, AttributeError, ValueError, ValidationError) as error:
@@ -351,18 +358,28 @@ async def compose_stream(request: ComposeRequest):
         except HTTPException as error:
             detail = error.detail
             if draft is not None and isinstance(detail, dict) and detail.get("code") == "text_review_failed":
+                metrics.event("compose_review_fallback")
                 yield stream_line({"stage": "final", "reviewed": False, "warning": "这次只完成了一轮整理，文字已保留。", **public_note(draft, config)})
             else:
+                code = detail.get("code", "") if isinstance(detail, dict) else ""
+                metrics.event("compose_error")
+                metrics.error("/api/journey/compose/stream", error.status_code, code)
                 yield stream_line({"stage": "error", "status": error.status_code, "detail": detail})
         except (httpx.TimeoutException, asyncio.TimeoutError):
             if draft is not None:
+                metrics.event("compose_review_fallback")
                 yield stream_line({"stage": "final", "reviewed": False, "warning": "复核超时，已保留当前文字。", **public_note(draft, config)})
             else:
+                metrics.event("compose_error")
+                metrics.error("/api/journey/compose/stream", 504, "text_timeout")
                 yield stream_line({"stage": "error", "status": 504, "detail": {"code": "text_timeout", "message": "回信生成超时，完整讲述已保留，可以重新整理。"}})
         except httpx.RequestError:
             if draft is not None:
+                metrics.event("compose_review_fallback")
                 yield stream_line({"stage": "final", "reviewed": False, "warning": "复核暂时中断，已保留当前文字。", **public_note(draft, config)})
             else:
+                metrics.event("compose_error")
+                metrics.error("/api/journey/compose/stream", 502, "text_connection_failed")
                 yield stream_line({"stage": "error", "status": 502, "detail": {"code": "text_connection_failed", "message": "无法连接文本服务，完整讲述已保留，请检查服务配置。"}})
     return StreamingResponse(events(), media_type="application/x-ndjson",
                              headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})

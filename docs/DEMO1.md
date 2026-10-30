@@ -13,6 +13,7 @@
 - 已上线（2026-10-30）：提交 `a1d0084`，release `demo1-a1d0084`；旧 release 与旧哈希静态资源全部保留。上线前确认线上运行的 `index-DEHTcska.js` 与 `f676b67` 本地构建逐字节一致，避免覆盖线上独有改动。公网实测：真实讲述的 `/api/journey/compose/stream` 草稿 **6.36 秒**到达、审校版 **9.10 秒**到达（Caddy 未压缩该 NDJSON，响应无 `content-encoding`）；`/api/journey/asr-session` 连续两次均 **0.17 秒**（凭证缓存生效）；旧 bundle 与 `journeyVad` chunk 仍返回 200，已打开的页面不受影响。
 - 回滚：drop-in 与三个私密配置备份在 `/opt/amphion-gjh-backups/20261030-pre-a1d0084/`。将 `/etc/systemd/system/amphion-gjh.service.d/demo1.conf` 中的 `demo1-a1d0084` 换回 `demo1-20261029-share1`，执行 `systemctl daemon-reload && systemctl restart amphion-gjh` 即可；新 release 目录可保留。
 - 追加（同日，整理失败排查）：现场出现“回信生成超时 / 整理一直失败”。定位到 `deepseek-flash` 为推理模型，长且杂乱的讲述会把 4096 `max_tokens` 全部消耗在 reasoning 上，返回 `finish_reason=length`、`reasoning_tokens=4096`、正文为空；校验失败后的重试同样失败，单次调用实测 32.6 秒，且上游还会间歇返回 503“Service is too busy”。处理：文本模型切到非推理的 `deepseek-chat`，并对 429/5xx 增加一次 0.6 秒重试（`server/journey_text.py`）。线上实测同一段失败讲述：草稿 **2.8 秒**、审校版 **4.2 秒**；正常讲述 **1.8 秒 / 2.9 秒**。模型配置备份在 `.../.env.journey.json.before-model-switch`；若要回退 `deepseek-flash`，必须同时把 `MAX_COMPLETION_TOKENS` 提到 8192 以上，并接受单次 30–60 秒时延。
+- 追加（同日，后台与监控）：上线 `/admin` 运维看板（HTTP Basic）、`/api/admin/stats`、`/metrics`（Prometheus）与 `journey-monitor.timer`（每分钟检查，异常/恢复推企业微信）。看板与指标只保留聚合数据，不记录讲述、音频或密钥；健康探针新增文本模型、ASR、TTS、磁盘与前端构建检查。账号在 `/etc/amphion-gjh/admin.env`，告警 webhook 在 `/etc/amphion-gjh/monitor.env`（当前留空，待填群机器人地址）。实测：真实讲述后台记录草稿 1.73 秒、终版 3.12 秒；公网 `/admin` 未认证 401、认证 200；定时器每分钟运行且检查全部正常。使用说明见 [后台与监控](ADMIN.md)。
 
 
 ## 2026-10-21 竖屏与录音启动更新

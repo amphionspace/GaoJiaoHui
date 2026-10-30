@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the journey monitor every minute
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=60s
+AccuracySec=5s
+Unit=journey-monitor.service
+
+[Install]
+WantedBy=timers.target

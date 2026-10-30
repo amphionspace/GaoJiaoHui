@@ -1,0 +1,13 @@
+[Unit]
+Description=Journey service monitor (WeCom alerts)
+Wants=network-online.target
+After=network-online.target amphion-gjh.service
+
+[Service]
+Type=oneshot
+User=amphion-gjh
+Group=amphion-gjh
+EnvironmentFile=-/etc/amphion-gjh/monitor.env
+StateDirectory=amphion-gjh
+StateDirectoryMode=750
+ExecStart=/usr/bin/python3 /opt/amphion-gjh/bin/journey-monitor.py
