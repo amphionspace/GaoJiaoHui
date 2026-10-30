@@ -17,6 +17,7 @@ async function mount(name, options = {}) {
   const store = Vue.reactive({ apiKey: 'test-only', logs: [], demoMode: true })
   const storage = new Map()
   const mics = [], sounds = [], voices = [], sockets = [], recorders = []
+  const prefetches = { count: 0 }
   class Recorder {
     constructor(key, handlers) { this.handlers = handlers; recorders.push(this) }
     async start() { if (options.recorderStart) await options.recorderStart.promise }
@@ -81,7 +82,8 @@ async function mount(name, options = {}) {
     else if (specifier.endsWith('/api.js')) values = { WS_HOST: 'wss://test.invalid', boundedFetch: fetch }
     else if (specifier.endsWith('/store.js')) values = { store, setApiKey: k => { store.apiKey = k }, log() {}, dlog() {} }
     else if (specifier.endsWith('/audio.js')) values = { Mic, SR: 16000, wavEncode: () => new Blob(['wav']), fileToPCM: async () => new Int16Array(80000) }
-    else if (specifier.endsWith('/journeyAudio.js')) values = { JourneySound: Sound, JourneyVoice: Voice, JourneyRecorder: Recorder, cleanJourneyVoices() {}, voiceFailureMessage: e => e.message }
+    else if (specifier.endsWith('/journeyAudio.js')) values = { JourneySound: Sound, JourneyVoice: Voice, JourneyRecorder: Recorder, cleanJourneyVoices() {}, voiceFailureMessage: e => e.message,
+      prefetchAsrSession: () => { prefetches.count++; return Promise.resolve('') } }
     else if (specifier.endsWith('/journeySpeech.js')) values = { warmSpeechDetector: () => Promise.resolve(), releasePreparedDetector() {} }
     else values = { default: {} }
     return new vm.SyntheticModule(Object.keys(values), function () { for (const [k, v] of Object.entries(values)) this.setExport(k, v) }, { context })
@@ -98,7 +100,7 @@ async function mount(name, options = {}) {
   const app = renderer.createApp({ render: () => Vue.h(component, { active: active.value }) })
   app.mount({})
   const state = app._instance.subTree.component.setupState
-  return { state, active, app, store, document, window, mics, sounds, voices, sockets, recorders }
+  return { state, active, app, store, document, window, mics, sounds, voices, sockets, recorders, prefetches }
 }
 
 for (const name of ['ModuleWorkbench', 'ModuleVoiceClone']) {
@@ -227,6 +229,44 @@ test('guide stays visible after the reveal and only opens recording on explicit 
   assert.ok(recorders[0].stopped)
 })
 
+test('the introduction prefetches the ASR session before the visitor speaks', async () => {
+  const { state, prefetches, app } = await mount('BoothJourney')
+  assert.equal(prefetches.count, 0)
+  const starting = state.beginJourney()
+  await tick()
+  assert.ok(prefetches.count >= 1)
+  state.skipGuide()
+  await tick()
+  assert.ok(prefetches.count >= 2)
+  await starting
+  app.unmount()
+})
+
+test('the note is readable while the editorial pass is still running', async () => {
+  const gate = deferred()
+  const { state, app } = await mount('BoothJourney', {
+    compose: async (draft, options) => {
+      options.onDraft({ ...draft, summary: '草稿正文', noteText: '草稿正文', messageToSelf: '草稿回信' })
+      await gate.promise
+      return { ...draft, summary: '最终正文', noteText: '最终正文', messageToSelf: '最终回信' }
+    },
+    illustrate: async () => ({ sketch: 'image' }),
+  })
+  state.journal = journey.createJourneyJournal('和家人去看雪山。', 'future')
+  const task = state.composeNote()
+  await tick(); await tick()
+  assert.equal(state.stage, 'preview')
+  assert.equal(state.journal.summary, '草稿正文')
+  assert.equal(state.notePending, true)
+  gate.resolve()
+  await task
+  assert.equal(state.journal.summary, '最终正文')
+  assert.equal(state.notePending, false)
+  assert.equal(state.imageBusy, false)
+  assert.equal(state.journal.sketch, 'image')
+  app.unmount()
+})
+
 test('skipping introduction opens exactly one recorder; late audio completion cannot restart it', async () => {
   const { state, recorders, app } = await mount('BoothJourney')
   const starting = state.beginJourney()
@@ -286,7 +326,7 @@ test('illustration resolving after reset cannot restore the old journal', async 
   })
   state.journal = journey.createJourneyJournal('2036年，我想和爸妈旅行。', 'future')
   const job = state.composeNote(); await tick()
-  assert.equal(state.stage, 'generating')
+  assert.equal(state.stage, 'preview')
   state.reset()
   pending.resolve({ sketch: 'late' }); await job
   assert.equal(state.stage, 'welcome')
@@ -504,7 +544,8 @@ test('hiding the page stops capture but lets the pending illustration finish', a
   const task = state.composeNote(); await tick()
   document.hidden = true
   document.dispatchEvent(new Event('visibilitychange'))
-  assert.equal(state.stage, 'generating')
+  assert.equal(state.stage, 'preview')
+  assert.equal(state.imageBusy, true)
   assert.equal(state.recording, false)
   pending.resolve({ sketch: 'completed-in-background' })
   await task

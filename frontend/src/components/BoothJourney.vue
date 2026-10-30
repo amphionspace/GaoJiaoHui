@@ -1,9 +1,9 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
-import { store } from '../core/store.js'
+import { store, dlog } from '../core/store.js'
 import { toggleLocale } from '../core/i18n.js'
 import { endingIntent, createJourneyJournal, composeJourneyJournal, illustrateJourneyJournal } from '../core/journey.js'
-import { JourneyRecorder, JourneySound, JourneyVoice, cleanJourneyVoices, voiceFailureMessage } from '../core/journeyAudio.js'
+import { JourneyRecorder, JourneySound, JourneyVoice, cleanJourneyVoices, voiceFailureMessage, prefetchAsrSession } from '../core/journeyAudio.js'
 import { warmSpeechDetector, releasePreparedDetector } from '../core/journeySpeech.js'
 import JourneyIcon from './JourneyIcon.vue'
 import JourneyReceipt from './JourneyReceipt.vue'
@@ -23,7 +23,7 @@ const connectionPhase = ref('microphone')
 const connectionLabel = computed(() => ({ microphone: '正在开启麦克风', speech: '正在准备倾听', connection: '正在接通语音服务' }[connectionPhase.value] || '正在接通'))
 const connectionHint = computed(() => ({ microphone: '如浏览器询问权限，请选择允许使用麦克风。', speech: '首次使用需要加载片刻，准备好后会提醒你开始。', connection: '麦克风已就绪，正在等待语音服务。' }[connectionPhase.value] || ''))
 const error = ref(''), notice = ref(''), voiceIssue = ref('')
-const imageIssue = ref(''), imageBusy = ref(false)
+const imageIssue = ref(''), imageBusy = ref(false), notePending = ref(false)
 const transcriptWarning = ref('')
 const autoFinishSeconds = ref(0)
 const voiceEnabled = ref(false), voiceState = ref('waiting'), audioUrl = ref('')
@@ -95,6 +95,7 @@ function cancelSession() {
   releasePreparedDetector()
   introRun++; introPlaying.value = false
   session++; stopRecording(); stopPlayback(); releaseAudio()
+  notePending.value = false
   if (textRequest && journal.value?.summary && !journal.value.sketch) imageIssue.value = '插画生成已中断，文字手记已保留。请点击重试插画。'
   textRequest?.abort(); textRequest = null
   imageBusy.value = false
@@ -113,6 +114,7 @@ async function beginJourney() {
   const id = session, run = ++introRun
   stage.value = 'intro'; introPlaying.value = true; guideSkipped.value = false; guideReplay.value++
   warmSpeechDetector().catch(() => {})
+  prefetchAsrSession()          // mint the temporary ASR credential while the story plays
   try {
     // Keep the story page quiet for now; the three visual comparisons carry the introduction.
     for (let chapter = 0; chapter < 3; chapter++) {
@@ -121,6 +123,7 @@ async function beginJourney() {
       if (id !== session || run !== introRun || !props.active) return
     }
     introPlaying.value = false
+    prefetchAsrSession()        // refresh it now that the visitor is about to speak
     // Keep the complete comparison visible until the visitor chooses to speak.
   } catch {
     if (id !== session || run !== introRun) return
@@ -132,6 +135,7 @@ function skipGuide() {
   introRun++
   introPlaying.value = false
   guideSkipped.value = true
+  prefetchAsrSession()
 }
 async function startListening() {
   if (!props.active || stage.value !== 'intro') return
@@ -148,11 +152,20 @@ async function listen() {
     return
   }
   const id = session, myTurn = turn, prefix = text.value.trim()
+  const phaseAt = { start: performance.now() }
   connecting.value = true; paused.value = false
   connectionPhase.value = 'microphone'
   transcriptWarning.value = ''
   const current = new JourneyRecorder(store.apiKey, {
-    onPhase(value) { if (id === session && myTurn === turn) connectionPhase.value = value },
+    onPhase(value) {
+      if (id !== session || myTurn !== turn) return
+      connectionPhase.value = value
+      phaseAt[value] = performance.now() - phaseAt.start
+      if (value === 'ready') {
+        const span = (from, to) => Math.max(0, Math.round((phaseAt[to] ?? phaseAt.ready) - (phaseAt[from] ?? 0)))
+        dlog(`旅程：接通用时 · 权限 ${span('start', 'microphone')}ms · 检测 ${span('microphone', 'speech')}ms · 凭证 ${span('speech', 'connection')}ms · 连接 ${span('connection', 'ready')}ms`)
+      }
+    },
     onText(value) {
       if (id !== session || myTurn !== turn) return
       text.value = [prefix, value].filter(Boolean).join('\n')
@@ -221,24 +234,41 @@ async function composeNote() {
   if (!journal.value) return
   stopRecording(); stopPlayback(); releaseAudio(); textRequest?.abort()
   const controller = textRequest = new AbortController(), id = session, draft = journal.value
+  const revision = draft.revision
+  const alive = () => id === session && textRequest === controller && journal.value?.revision === revision && !controller.signal.aborted
   stage.value = 'generating'; error.value = notice.value = imageIssue.value = ''; busyLabel.value = '正在整理你对 2036 的期待'
+  notePending.value = false
+  let illustrationJob = null
+  const illustrate = note => illustrateJourneyJournal(note, { signal: controller.signal, apiKey: store.apiKey })
+    .then(illustration => { if (alive()) journal.value = { ...journal.value, ...illustration }; return illustration })
+    .catch(error => {
+      if (alive()) imageIssue.value = error.name === 'TimeoutError' ? '插画生成超时，文字手记已保留。' : error.message
+      return null
+    })
   try {
-    const result = await composeJourneyJournal(draft, { signal: controller.signal, apiKey: store.apiKey, language: store.locale })
-    if (id !== session || textRequest !== controller || journal.value?.revision !== draft.revision) return
-    journal.value = result
+    const result = await composeJourneyJournal(draft, {
+      signal: controller.signal, apiKey: store.apiKey, language: store.locale,
+      // The first pass returns a complete note; show it while the editorial pass runs.
+      onDraft(partial) {
+        if (!alive()) return
+        journal.value = partial
+        notePending.value = true
+        stage.value = 'preview'
+        imageBusy.value = true
+        illustrationJob = illustrate(partial)
+      },
+      onWarning(message) { if (alive()) notice.value = message },
+    })
+    if (!alive()) return
+    journal.value = { ...result, ...(journal.value?.sketch ? { sketch: journal.value.sketch, imageModel: journal.value.imageModel } : {}) }
+    notePending.value = false
     busyLabel.value = '正在把你的想象画进手记'
-    imageBusy.value = true
-    try {
-      const illustration = await illustrateJourneyJournal(result, { signal: controller.signal, apiKey: store.apiKey })
-      if (id !== session || textRequest !== controller || controller.signal.aborted) return
-      journal.value = { ...result, ...illustration }
-    } catch (e) {
-      if (id !== session || textRequest !== controller || controller.signal.aborted) return
-      imageIssue.value = e.name === 'TimeoutError' ? '插画生成超时，文字手记已保留。' : e.message
-    } finally {
-      if (id === session && textRequest === controller) imageBusy.value = false
-    }
-    textRequest = null; stage.value = 'preview'
+    stage.value = 'preview'                 // never hold the note behind the illustration
+    if (!illustrationJob) { imageBusy.value = true; illustrationJob = illustrate(result) }
+    await illustrationJob
+    if (!alive()) return
+    imageBusy.value = false
+    textRequest = null
     if (voiceEnabled.value && voice?.registration) await makeAudio(!document.hidden)
     else if (voiceEnabled.value && !textMode.value) {
       voiceState.value = 'failed'
@@ -247,11 +277,12 @@ async function composeNote() {
   } catch (e) {
     if (id !== session || textRequest !== controller || controller.signal.aborted) return
     textRequest = null; stage.value = 'preview'
+    imageBusy.value = false; notePending.value = false
     error.value = e.name === 'TimeoutError' ? '回信生成超时，完整讲述已保留，可以重新整理。' : e.message
   }
 }
 async function retryIllustration() {
-  if (imageBusy.value || !journal.value?.summary) return
+  if (imageBusy.value || notePending.value || !journal.value?.summary) return
   const controller = textRequest = new AbortController(), id = session, draft = journal.value
   imageBusy.value = true; imageIssue.value = ''
   try {
@@ -309,7 +340,7 @@ async function togglePlayback() {
   else { try { await sound.resume(); audioPaused.value = false } catch { error.value = '播放未能继续，请重新播放。' } }
 }
 async function printJournal() {
-  if (!journal.value?.summary || stage.value === 'printing' || imageBusy.value) return
+  if (!journal.value?.summary || stage.value === 'printing' || imageBusy.value || notePending.value) return
   const id = session
   stopPlayback(); stopRecording(); stage.value = 'printing'; printReturned.value = false
   await nextTick()
@@ -411,7 +442,7 @@ onBeforeUnmount(() => {
       </footer>
       <div v-if="connecting" class="mic-connection-overlay">
         <div class="mic-connection-card" role="status" aria-live="polite">
-          <div class="mic-connection-pill"><i class="connection-spinner" />正在连接麦克风</div>
+          <div class="mic-connection-pill"><i class="connection-spinner" />{{ connectionLabel }}</div>
           <p>{{ connectionHint }}</p><small>连接完成后，就可以开始说话。</small>
           <div class="mic-connection-actions"><button class="journey-secondary" @click="useText">改用文字</button><button class="journey-link" @click="reset">返回首页</button></div>
         </div>
@@ -423,11 +454,12 @@ onBeforeUnmount(() => {
       <div v-else class="journey-recovery"><h2>讲述已保留</h2><p>回信还没准备好，你可以直接重试。</p><div class="recovery-transcript" tabindex="0" aria-label="已保留的完整讲述">{{ journal.originalText }}</div></div>
       <div class="journey-result-content">
         <p v-if="imageIssue" class="journey-notice" role="status">{{ imageIssue }} <button class="journey-link" @click="retryIllustration">重试插画</button></p>
+        <p v-if="notePending" class="journey-notice" role="status">正在最后核对措辞，文字已经可以阅读…</p>
         <p v-if="imageBusy" class="journey-notice" role="status">正在画下你的期待…</p>
         <button v-if="!journal.messageToSelf" class="journey-primary retry-note" @click="composeNote"><JourneyIcon name="RotateCcw" />重新整理</button>
         <template v-if="stage === 'printing'"><p class="journey-notice">{{ printReturned ? '打印窗口已关闭，请确认是否收到手记。' : '等待打印操作完成。' }}</p><div class="journey-actions"><button class="journey-primary" @click="complete"><JourneyIcon name="Check" />已收到手记</button><button class="journey-secondary" @click="backToPreview">返回预览</button></div></template>
         <template v-else>
-          <div class="journey-actions"><button v-if="journal.summary" class="journey-primary" :disabled="imageBusy" @click="printJournal"><JourneyIcon name="Printer" />打印手记</button><button v-if="audioUrl" class="journey-play" :aria-label="playing && !audioPaused ? '暂停播放' : '播放我的声音'" :title="playing && !audioPaused ? '暂停播放' : '播放我的声音'" @click="togglePlayback"><JourneyIcon :name="playing && !audioPaused ? 'Pause' : 'Play'" /></button><button v-else-if="journal.messageToSelf && voiceEnabled && voiceState === 'failed'" class="journey-secondary" @click="makeAudio(true, true)"><JourneyIcon name="Volume2" />重试声音</button></div>
+          <div class="journey-actions"><button v-if="journal.summary" class="journey-primary" :disabled="imageBusy || notePending" @click="printJournal"><JourneyIcon name="Printer" />打印手记</button><button v-if="audioUrl" class="journey-play" :aria-label="playing && !audioPaused ? '暂停播放' : '播放我的声音'" :title="playing && !audioPaused ? '暂停播放' : '播放我的声音'" @click="togglePlayback"><JourneyIcon :name="playing && !audioPaused ? 'Pause' : 'Play'" /></button><button v-else-if="journal.messageToSelf && voiceEnabled && voiceState === 'failed'" class="journey-secondary" @click="makeAudio(true, true)"><JourneyIcon name="Volume2" />重试声音</button></div>
         </template>
         <button class="journey-secondary result-home" @click="reset"><JourneyIcon name="ArrowLeft" />返回首页</button>
       </div>

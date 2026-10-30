@@ -78,15 +78,7 @@ export function editJourneyJournal(journal, instruction) {
     summary: '', messageToSelf: '', takeaway: '', keywords: [], generation: 'pending', revision: journal.revision + 1 }
 }
 
-export async function composeJourneyJournal(journal, { signal, apiKey = '', request = fetch, language = 'zh' } = {}) {
-  // Send the complete ASR record, including later corrections and additions.
-  const response = await request('/api/journey/compose', {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
-    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(90000)]) : AbortSignal.timeout(90000),
-    body: JSON.stringify({ transcript: journal.originalText, topic: journal.topicId, language }),
-  })
-  const data = await response.json()
-  if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : data.detail?.message || '回信暂时无法生成，完整讲述已保留。')
+const noteFields = (journal, data) => {
   const noteText = data.note_text || data.summary
   if (data.generation !== 'model' || !noteText?.trim() || !data.message?.trim() || !Array.isArray(data.keywords)) {
     throw new Error('回信内容不完整，完整讲述已保留，请重新整理。')
@@ -94,8 +86,63 @@ export async function composeJourneyJournal(journal, { signal, apiKey = '', requ
   if (Array.from(data.message).length > 50) {
     throw new Error('这次回信太长，完整讲述已保留，请重新整理。')
   }
-  return { ...journal, noteText, summary: noteText, messageToSelf: data.message, takeaway: data.takeaway || '', keywords: data.keywords,
-    generation: 'model', textModel: data.model, sketchPrompt: data.sketch_prompt || '' }
+  return { ...journal, noteText, summary: noteText, messageToSelf: data.message, takeaway: data.takeaway || '',
+    keywords: data.keywords, generation: 'model', textModel: data.model, sketchPrompt: data.sketch_prompt || '',
+    reviewed: data.reviewed !== false }
+}
+
+const responseError = data => new Error(typeof data?.detail === 'string'
+  ? data.detail : data?.detail?.message || '回信暂时无法生成，完整讲述已保留。')
+
+export async function composeJourneyJournal(journal, { signal, apiKey = '', request = fetch, language = 'zh', onDraft, onWarning } = {}) {
+  // Send the complete ASR record, including later corrections and additions.
+  const body = JSON.stringify({ transcript: journal.originalText, topic: journal.topicId, language })
+  const timeout = signal ? AbortSignal.any([signal, AbortSignal.timeout(90000)]) : AbortSignal.timeout(90000)
+  const response = await request('/api/journey/compose/stream', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+    signal: timeout, body,
+  })
+  if (!response.ok) {
+    let data = {}
+    try { data = await response.json() } catch { /* Not JSON. */ }
+    throw responseError(data)
+  }
+  // A buffered body (older server or a test double) still returns one note.
+  if (!response.body?.getReader) return noteFields(journal, await response.json())
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = '', draft = null, final = null
+  try {
+    for (;;) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      let index
+      while ((index = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, index).trim()
+        buffer = buffer.slice(index + 1)
+        if (!line) continue
+        let event
+        try { event = JSON.parse(line) } catch { continue }
+        if (event.stage === 'draft') {
+          // Show the first usable draft; a later retry replaces it.
+          let note = null
+          try { note = noteFields(journal, event) } catch { /* Wait for the reviewed note. */ }
+          if (note) { draft = note; onDraft?.(note) }
+        } else if (event.stage === 'final') {
+          final = noteFields(journal, event)
+          if (event.warning) onWarning?.(event.warning)
+        } else if (event.stage === 'error') {
+          throw responseError(event)
+        }
+      }
+    }
+  } finally {
+    try { reader.releaseLock?.() } catch { /* Already released. */ }
+  }
+  if (final) return final
+  if (draft) return draft
+  throw new Error('回信生成中断，完整讲述已保留，请重新整理。')
 }
 
 export async function illustrateJourneyJournal(journal, { signal, apiKey = '', request = fetch } = {}) {

@@ -14,6 +14,8 @@ class ManagedAsrTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         # Only synthetic credentials are used; no local credential file is read.
         self.config = {'base_url': 'https://api.fourhz.amphion.top', 'api_key': 'test-private-key'}
+        managed_asr.reset_session_cache()
+        self.addCleanup(managed_asr.reset_session_cache)
         self.control = security.AccessControl()
         for target, name, value in (
             (managed_asr, 'enabled', lambda: True),
@@ -247,6 +249,52 @@ class ManagedAsrTests(unittest.IsolatedAsyncioTestCase):
             await self.token_request(handler)
         self.assertEqual(error.exception.status_code, 503)
         self.assertNotIn('private-provider-diagnostics', error.exception.detail)
+
+    async def test_fresh_token_is_reused_until_it_expires_or_the_key_rotates(self):
+        class Clock:
+            def __init__(self):
+                self.now = 1000.0
+
+            def monotonic(self):
+                return self.now
+
+        request = AsyncMock(side_effect=['token-1', 'token-2', 'token-3'])
+        clock = Clock()
+        with patch.object(managed_asr, 'time', clock), patch.object(managed_asr, '_request_token', request):
+            first = await managed_asr.mint_token()
+            again = await managed_asr.mint_token()
+            clock.now += managed_asr.SESSION_REUSE_SECONDS + 1
+            expired = await managed_asr.mint_token()
+            self.config['api_key'] = 'rotated-key'
+            rotated = await managed_asr.mint_token()
+        self.assertEqual(first, again)
+        self.assertEqual([first, expired, rotated], ['token-1', 'token-2', 'token-3'])
+        self.assertEqual(request.await_count, 3)
+
+    async def test_auth_check_and_recording_session_share_one_token_request(self):
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+
+        async def request(config):
+            calls.append(config)
+            started.set()
+            await release.wait()
+            return 'shared-token'
+
+        with patch.object(managed_asr, '_request_token', request):
+            async with self.client() as client:
+                await client.get('/api/config')
+                # compose_access allows two concurrent generations per identity.
+                tasks = [asyncio.create_task(client.post('/api/journey/asr-session', headers={'Origin': 'http://127.0.0.1:5173'}))
+                         for _ in range(2)]
+                await asyncio.wait_for(started.wait(), 2)
+                release.set()
+                responses = await asyncio.gather(*tasks)
+        self.assertTrue(all(response.status_code == 200 for response in responses))
+        self.assertEqual({response.json()['url'] for response in responses}, {
+            'wss://api.fourhz.amphion.top/v1/asr/realtime?speech_model=fourhz-spectrum&token=shared-token'})
+        self.assertEqual(len(calls), 1)
 
 
 if __name__ == '__main__':

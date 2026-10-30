@@ -84,7 +84,7 @@ test('generation uses the full raw transcript and keeps model summary separate f
   const draft = createJourneyJournal(raw, 'product')
   let payload
   const result = await composeJourneyJournal(draft, { request: async (url, options) => {
-    assert.equal(url, '/api/journey/compose')
+    assert.equal(url, '/api/journey/compose/stream')
     payload = JSON.parse(options.body)
     return { ok: true, json: async () => ({ generation: 'model', note_text: '我想知道机器人能否替爸爸搬重物。希望它真的能让爸爸轻松一点。', message: '我是以后的你。你看到机器人的时候，想起的是爸爸搬重物的辛苦。', keywords: ['爸爸', '搬重物'], model: 'test-model' }) }
   } })
@@ -128,4 +128,52 @@ test('overlong replies from an outdated server are rejected without truncating o
   await assert.rejects(composeJourneyJournal(draft, { request: requestFor(boundary + '呀') }), /回信太长/)
   assert.equal(draft.messageToSelf, '')
   assert.equal(draft.originalText, '我想让爸爸搬东西省些力。')
+})
+
+const streamOf = events => new ReadableStream({
+  start(controller) {
+    const encoder = new TextEncoder()
+    for (const event of events) controller.enqueue(encoder.encode(JSON.stringify(event) + '\n'))
+    controller.close()
+  },
+})
+const draftNote = message => ({ generation: 'model', note_text: '我想让爸爸搬东西省些力。', message, keywords: ['爸爸'], model: 'test-model' })
+
+test('a draft note reaches the page before the reviewed note', async () => {
+  const journal = createJourneyJournal('我想让爸爸搬东西省些力。', 'future')
+  const seen = []
+  const result = await composeJourneyJournal(journal, {
+    onDraft: note => seen.push(note.messageToSelf),
+    request: async () => ({ ok: true, body: streamOf([
+      { stage: 'draft', reviewed: false, ...draftNote('你想让爸爸少弯一点腰。') },
+      { stage: 'final', reviewed: true, ...draftNote('你想让爸爸少弯一点腰，这份心意值得留下。') },
+    ]) }),
+  })
+  assert.deepEqual(seen, ['你想让爸爸少弯一点腰。'])
+  assert.equal(result.messageToSelf, '你想让爸爸少弯一点腰，这份心意值得留下。')
+  assert.equal(result.reviewed, true)
+})
+
+test('an unreviewed fallback keeps the draft and reports the warning', async () => {
+  const journal = createJourneyJournal('我想让爸爸搬东西省些力。', 'future')
+  const warnings = []
+  const result = await composeJourneyJournal(journal, {
+    onWarning: message => warnings.push(message),
+    request: async () => ({ ok: true, body: streamOf([
+      { stage: 'draft', reviewed: false, ...draftNote('你想让爸爸少弯一点腰。') },
+      { stage: 'final', reviewed: false, warning: '这次只完成了一轮整理，文字已保留。', ...draftNote('你想让爸爸少弯一点腰。') },
+    ]) }),
+  })
+  assert.deepEqual(warnings, ['这次只完成了一轮整理，文字已保留。'])
+  assert.equal(result.reviewed, false)
+})
+
+test('a streamed error event preserves the spoken record', async () => {
+  const journal = createJourneyJournal('我想让爸爸搬东西省些力。', 'future')
+  await assert.rejects(composeJourneyJournal(journal, {
+    request: async () => ({ ok: true, body: streamOf([
+      { stage: 'error', status: 504, detail: { code: 'text_timeout', message: '回信生成超时，完整讲述已保留，可以重新整理。' } },
+    ]) }),
+  }), /回信生成超时/)
+  assert.equal(journal.originalText, '我想让爸爸搬东西省些力。')
 })

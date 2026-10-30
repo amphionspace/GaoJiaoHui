@@ -9,6 +9,7 @@ from typing import Literal
 
 import httpx
 from fastapi import APIRouter, HTTPException, Depends
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 try:
     from .security import compose_access
@@ -223,13 +224,36 @@ def parse_note(content, transcript, language="zh"):
     return note
 
 
-@router.post("/compose", dependencies=[Depends(compose_access)])
-async def compose(request: ComposeRequest):
+def public_note(note, config):
+    return {"note_text": note.note_text, "summary": note.note_text, "message": note.message,
+            "takeaway": note.takeaway, "keywords": note.keywords, "sketch_prompt": note.sketch_prompt,
+            "generation": "model", "model": config["model"]}
+
+
+def retry_prompt(error, english):
+    if english:
+        return ("Previous output failed validation: " + str(error)[:300] + ". Re-read the full transcript and return valid JSON. Prefer two complete connected sentences for note_text, usually 40–70 characters and at most 80; use one or three only when needed. Output only the note body without a title, label, quotation marks, bullets, explanation, or alternatives. Keep message under 50 characters including punctuation, rewrite complete sentences instead of truncating, remove fillers, respond to the specific concern immediately, do not greet, praise personality, or repeat the transcript. takeaway must be copied exactly from one complete message sentence. anchors must be exact continuous excerpts from the transcript. sketch_prompt must be one concrete visible scene and must not turn product feedback into a future wish. Write all user-facing fields in English.")
+    return ("上次结果未通过检查：" + str(error)[:300] + "。请重新核对全文，严格按系统要求返回合法JSON：note_text优先写成两句完整连贯的话，通常40至70字、最多80字，必要时才用1句或3句；只输出正文，不要标题、称呼、落款、日期、标签、引号、要点、解释或多个版本。保留原文具体细节、条件、否定和不确定性，不新增信息。message最多50个字符（含标点），超长就重写完整短句，不能截断。清除口癖，以未来的自己回应今天的你，第一句直接回应具体牵挂，不问好、不夸人格、不复读原文。takeaway原样取message一句完整话。anchors必须是原文中真实的连续片段，sketch_prompt必须是具体可见的单幅场景；如果原文只是产品或页面反馈，不要把它写成未来愿望。")
+
+
+def compose_configuration(request):
     if not request.transcript.strip():
         raise HTTPException(422, detail={"code": "empty_transcript", "message": "还没有记录到讲述。"})
     config = configuration()
     if not config["url"] or not config["model"]:
         raise HTTPException(503, detail={"code": "text_not_configured", "message": "回信服务尚未连接，完整讲述已保留。请工作人员配置文本模型后重新整理。"})
+    return config
+
+
+async def compose_notes(request, config=None):
+    """Yield ("draft"|"final", note, config) as each usable model result arrives.
+
+    The draft is emitted before the editorial pass so the browser can show text
+    while the review is still running; a retry after a rejected review emits a
+    fresh draft. Both HTTP endpoints share this generator so the two-pass rules
+    and their retry behaviour stay in one place.
+    """
+    config = config or compose_configuration(request)
     headers = {"Authorization": "Bearer " + config["api_key"]} if config["api_key"] else {}
     english = request.language == "en"
     messages = [
@@ -238,46 +262,98 @@ async def compose(request: ComposeRequest):
             {"topic": TOPICS_EN[request.topic], "transcript": request.transcript} if english else
             {"主题": TOPICS[request.topic], "完整讲述": request.transcript}, ensure_ascii=False)},
     ]
-    try:
-        local_model = httpx.URL(config["url"]).host in ("127.0.0.1", "localhost", "::1")
-        deadline = time.monotonic() + 82
-        async with httpx.AsyncClient(timeout=40, trust_env=not local_model) as client:
-            async def post(payload):
-                return await asyncio.wait_for(client.post(config["url"], headers=headers, json=payload),
-                                              timeout=min(40, max(0.01, deadline - time.monotonic())))
-            for attempt in range(2):
-                response = await post({
-                    "model": config["model"], "messages": messages,
-                    "temperature": 0.65, "max_tokens": MAX_COMPLETION_TOKENS,
+    local_model = httpx.URL(config["url"]).host in ("127.0.0.1", "localhost", "::1")
+    deadline = time.monotonic() + 82
+    async with httpx.AsyncClient(timeout=40, trust_env=not local_model) as client:
+        async def post(payload):
+            return await asyncio.wait_for(client.post(config["url"], headers=headers, json=payload),
+                                          timeout=min(40, max(0.01, deadline - time.monotonic())))
+        for attempt in range(2):
+            response = await post({
+                "model": config["model"], "messages": messages,
+                "temperature": 0.65, "max_tokens": MAX_COMPLETION_TOKENS,
+            })
+            if response.status_code >= 400:
+                status = response.status_code
+                message = "文本服务鉴权失败，请工作人员检查配置。" if status in (401, 403) else "文本服务暂时无法生成回信，请稍后重试。"
+                raise HTTPException(502, detail={"code": "text_upstream_error", "message": message, "upstream_status": status})
+            try:
+                content = response.json()["choices"][0]["message"]["content"]
+                note = parse_note(content, request.transcript, request.language)
+                yield "draft", note, config
+                # A separate editorial pass checks meaning, which length/anchor checks cannot establish.
+                reviewed = await post({
+                    "model": config["model"], "temperature": 0.2, "max_tokens": MAX_COMPLETION_TOKENS,
+                    "messages": messages[:2] + [
+                        {"role": "assistant", "content": note.model_dump_json()},
+                        {"role": "user", "content": REVIEW_PROMPT_EN if english else REVIEW_PROMPT},
+                    ],
                 })
-                if response.status_code >= 400:
-                    status = response.status_code
-                    message = "文本服务鉴权失败，请工作人员检查配置。" if status in (401, 403) else "文本服务暂时无法生成回信，请稍后重试。"
-                    raise HTTPException(502, detail={"code": "text_upstream_error", "message": message, "upstream_status": status})
-                try:
-                    content = response.json()["choices"][0]["message"]["content"]
-                    note = parse_note(content, request.transcript, request.language)
-                    # A separate editorial pass checks meaning, which length/anchor checks cannot establish.
-                    reviewed = await post({
-                        "model": config["model"], "temperature": 0.2, "max_tokens": MAX_COMPLETION_TOKENS,
-                        "messages": messages[:2] + [
-                            {"role": "assistant", "content": note.model_dump_json()},
-                            {"role": "user", "content": REVIEW_PROMPT_EN if english else REVIEW_PROMPT},
-                        ],
-                    })
-                    if reviewed.status_code >= 400:
-                        raise HTTPException(502, detail={"code": "text_review_failed", "message": "回信审校暂时不可用，讲述已保留，请重试。"})
-                    note = parse_note(reviewed.json()["choices"][0]["message"]["content"], request.transcript, request.language)
-                    return {"note_text": note.note_text, "summary": note.note_text, "message": note.message, "takeaway": note.takeaway, "keywords": note.keywords, "sketch_prompt": note.sketch_prompt,
-                            "generation": "model", "model": config["model"]}
-                except (KeyError, IndexError, TypeError, AttributeError, ValueError, ValidationError) as error:
-                    if not attempt:
-                        retry_prompt = ("Previous output failed validation: " + str(error)[:300] + ". Re-read the full transcript and return valid JSON. Prefer two complete connected sentences for note_text, usually 40–70 characters and at most 80; use one or three only when needed. Output only the note body without a title, label, quotation marks, bullets, explanation, or alternatives. Keep message under 50 characters including punctuation, rewrite complete sentences instead of truncating, remove fillers, respond to the specific concern immediately, do not greet, praise personality, or repeat the transcript. takeaway must be copied exactly from one complete message sentence. anchors must be exact continuous excerpts from the transcript. sketch_prompt must be one concrete visible scene and must not turn product feedback into a future wish. Write all user-facing fields in English."
-                                         if english else
-                                         "上次结果未通过检查：" + str(error)[:300] + "。请重新核对全文，严格按系统要求返回合法JSON：note_text优先写成两句完整连贯的话，通常40至70字、最多80字，必要时才用1句或3句；只输出正文，不要标题、称呼、落款、日期、标签、引号、要点、解释或多个版本。保留原文具体细节、条件、否定和不确定性，不新增信息。message最多50个字符（含标点），超长就重写完整短句，不能截断。清除口癖，以未来的自己回应今天的你，第一句直接回应具体牵挂，不问好、不夸人格、不复读原文。takeaway原样取message一句完整话。anchors必须是原文中真实的连续片段，sketch_prompt必须是具体可见的单幅场景；如果原文只是产品或页面反馈，不要把它写成未来愿望。")
-                        messages.append({"role": "user", "content": retry_prompt})
+                if reviewed.status_code >= 400:
+                    raise HTTPException(502, detail={"code": "text_review_failed", "message": "回信审校暂时不可用，讲述已保留，请重试。"})
+                reviewed_note = parse_note(reviewed.json()["choices"][0]["message"]["content"], request.transcript, request.language)
+                yield "final", reviewed_note, config
+                return
+            except (KeyError, IndexError, TypeError, AttributeError, ValueError, ValidationError) as error:
+                if not attempt:
+                    messages.append({"role": "user", "content": retry_prompt(error, english)})
+    raise HTTPException(502, detail={"code": "text_invalid_result", "message": "这次回信未通过内容检查，完整讲述已保留，请重新整理。"})
+
+
+@router.post("/compose", dependencies=[Depends(compose_access)])
+async def compose(request: ComposeRequest):
+    final = config = None
+    try:
+        async for kind, note, current in compose_notes(request):
+            config = current
+            if kind == "final":
+                final = note
     except (httpx.TimeoutException, asyncio.TimeoutError):
         raise HTTPException(504, detail={"code": "text_timeout", "message": "回信生成超时，完整讲述已保留，可以重新整理。"})
     except httpx.RequestError:
         raise HTTPException(502, detail={"code": "text_connection_failed", "message": "无法连接文本服务，完整讲述已保留，请检查服务配置。"})
-    raise HTTPException(502, detail={"code": "text_invalid_result", "message": "这次回信未通过内容检查，完整讲述已保留，请重新整理。"})
+    if final is None:
+        raise HTTPException(502, detail={"code": "text_invalid_result", "message": "这次回信未通过内容检查，完整讲述已保留，请重新整理。"})
+    return public_note(final, config)
+
+
+def stream_line(payload):
+    return json.dumps(payload, ensure_ascii=False) + "\n"
+
+
+@router.post("/compose/stream", dependencies=[Depends(compose_access)])
+async def compose_stream(request: ComposeRequest):
+    """Same two passes as /compose, but the draft is sent before the review ends.
+
+    Configuration and body problems are raised before the stream opens so they
+    keep their real HTTP status; model failures that happen later become events.
+    """
+    config = compose_configuration(request)
+
+    async def events():
+        draft = None
+        try:
+            async for kind, note, _ in compose_notes(request, config):
+                if kind == "draft":
+                    draft = note
+                    yield stream_line({"stage": "draft", "reviewed": False, **public_note(note, config)})
+                else:
+                    yield stream_line({"stage": "final", "reviewed": True, **public_note(note, config)})
+        except HTTPException as error:
+            detail = error.detail
+            if draft is not None and isinstance(detail, dict) and detail.get("code") == "text_review_failed":
+                yield stream_line({"stage": "final", "reviewed": False, "warning": "这次只完成了一轮整理，文字已保留。", **public_note(draft, config)})
+            else:
+                yield stream_line({"stage": "error", "status": error.status_code, "detail": detail})
+        except (httpx.TimeoutException, asyncio.TimeoutError):
+            if draft is not None:
+                yield stream_line({"stage": "final", "reviewed": False, "warning": "复核超时，已保留当前文字。", **public_note(draft, config)})
+            else:
+                yield stream_line({"stage": "error", "status": 504, "detail": {"code": "text_timeout", "message": "回信生成超时，完整讲述已保留，可以重新整理。"}})
+        except httpx.RequestError:
+            if draft is not None:
+                yield stream_line({"stage": "final", "reviewed": False, "warning": "复核暂时中断，已保留当前文字。", **public_note(draft, config)})
+            else:
+                yield stream_line({"stage": "error", "status": 502, "detail": {"code": "text_connection_failed", "message": "无法连接文本服务，完整讲述已保留，请检查服务配置。"}})
+    return StreamingResponse(events(), media_type="application/x-ndjson",
+                             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})

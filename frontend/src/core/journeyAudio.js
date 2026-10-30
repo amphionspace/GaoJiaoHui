@@ -3,6 +3,44 @@ import { WS_HOST, api } from './api.js'
 import { createSpeechDetector } from './journeySpeech.js'
 import { store } from './store.js'
 
+/* The managed ASR credential is minted on the server (about one second) and is
+   valid for 60 s. Prefetch it while the introduction is still on screen so the
+   click that starts listening does not pay for it; 40 s keeps 20 s of headroom
+   for the WebSocket handshake. */
+const SESSION_REUSE_MS = 40000
+let preparedSession = null
+let sessionPending = null
+
+function takePreparedSession() {
+  if (!preparedSession) return ''
+  const { url, at } = preparedSession
+  preparedSession = null
+  return Date.now() - at < SESSION_REUSE_MS ? url : ''
+}
+
+function rememberSession(session) {
+  const url = session && typeof session.url === 'string' ? session.url : ''
+  preparedSession = url ? { url, at: Date.now() } : null
+  return session
+}
+
+export function prefetchAsrSession() {
+  if (!store.asrManaged) return Promise.resolve('')
+  if (preparedSession && Date.now() - preparedSession.at < SESSION_REUSE_MS) return Promise.resolve(preparedSession.url)
+  if (sessionPending) return sessionPending
+  sessionPending = (async () => {
+    try {
+      const session = rememberSession(await api('/asr-session', { prefix: '/api/journey', method: 'POST' }))
+      return session?.url || ''
+    } catch {
+      return ''
+    } finally {
+      sessionPending = null
+    }
+  })()
+  return sessionPending
+}
+
 export class JourneyRecorder {
   constructor(key, handlers = {}, { context = null } = {}) {
     this.key = key
@@ -64,6 +102,17 @@ export class JourneyRecorder {
     } finally { clearTimeout(timer); this.rejectStart = null }
   }
 
+  async takeSession(signal) {
+    const prepared = takePreparedSession()
+    if (prepared) return { url: prepared }
+    if (sessionPending) await sessionPending
+    const ready = takePreparedSession()
+    if (ready) return { url: ready }
+    return rememberSession(await api('/asr-session', {
+      prefix: '/api/journey', method: 'POST', signal,
+    }))
+  }
+
   async startInput() {
     this.handlers.onPhase?.('microphone')
     this.mic = new Mic({ context: this.context })
@@ -76,15 +125,17 @@ export class JourneyRecorder {
       if (this.closed) { await detector.dispose(); return null }
       return detector
     })
+    // Mint the temporary ASR credential while the local detector finishes; it
+    // used to be requested only afterwards, adding its full latency to every start.
+    if (this.managed) this.sessionController = new AbortController()
+    const sessionPending = this.managed ? this.takeSession(this.sessionController.signal) : null
+    sessionPending?.catch(() => {})
     this.detector = await this.waitForStart(pending, '人声检测未能启动，请刷新页面重试，或改用文字记录。')
     if (this.closed) { await this.detector?.dispose(); this.detector = null; return }
     this.handlers.onPhase?.('connection')
     let socketUrl = `${WS_HOST}/asr/v1/target-dialogue?api_key=${encodeURIComponent(this.key)}`
     if (this.managed) {
-      this.sessionController = new AbortController()
-      const session = await this.waitForStart(api('/asr-session', {
-        prefix: '/api/journey', method: 'POST', signal: this.sessionController.signal,
-      }), '语音授权超时，请重试或改用文字记录。')
+      const session = await this.waitForStart(sessionPending, '语音授权超时，请重试或改用文字记录。')
       if (this.closed) return
       let parsed
       try { parsed = new URL(session.url) } catch { throw new Error('语音连接地址无效，请检查服务配置。') }

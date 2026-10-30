@@ -42,7 +42,7 @@ HOST=127.0.0.1 PORT=8766 .venv/bin/python -m server.main
 - 语音 HTTP/WS 地址见 [运行配置示例](deploy/runtime.env.example)。前端启动时读取 `/api/config`，不需要为换网关重新构建。
 - Demo1 支持全界面英文体验：打开 `?lang=en`，或在页面右上角切换 `EN / 中`。竖屏英文地址为 `?view=portrait&lang=en`。
 - `JOURNEY_TTS_URL` 指向兼容当前临时音色协议的服务；**不能直接填任意商业厂商 URL**，注册、合成和认证协议需要适配。
-- `/api/journey/compose` 与百炼声音接口必须携带有效 `X-API-Key`，通过网关临时令牌接口校验。可设置服务端 `JOURNEY_ACCESS_KEY` 改为固定访问密钥校验；ASR 仍要求有效的网关密钥。
+- `/api/journey/compose`（及前端实际使用的流式版本 `/api/journey/compose/stream`）与百炼声音接口必须携带有效 `X-API-Key`，通过网关临时令牌接口校验。可设置服务端 `JOURNEY_ACCESS_KEY` 改为固定访问密钥校验；ASR 仍要求有效的网关密钥。
 
 文本与百炼声音接口共用限流：每来源每分钟最多 30 次、每密钥每分钟 10 次。文本同时最多 2 次；单进程文本总并发最多 8 次。密钥哈希缓存 60 秒，错误响应不回显密钥或完整上游异常。限流是单进程方案，扩容前需改为共享存储。
 

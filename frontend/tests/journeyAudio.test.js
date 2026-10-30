@@ -77,7 +77,7 @@ async function audioModule(api = async () => ({}), options = {}) {
     return new vm.SyntheticModule(Object.keys(values), function () { for (const [key, value] of Object.entries(values)) this.setExport(key, value) }, { context: ctx })
   })
   await module.evaluate()
-  return { ...module.namespace, Socket, Mic, AudioContext, storage }
+  return { ...module.namespace, Socket, Mic, AudioContext, storage, ctx }
 }
 
 const managedSession = { url: 'wss://example.test/v1/asr/realtime?speech_model=fourhz-spectrum&token=test-session' }
@@ -101,6 +101,61 @@ test('managed ASR obtains a temporary session and waits for Begin before capturi
   assert.deepEqual(phases, ['microphone', 'speech', 'connection', 'ready'])
   assert.equal(typeof Mic.latest.callback, 'function')
   recorder.stop()
+})
+
+test('a prefetched session is reused without a second credential request', async () => {
+  const calls = []
+  const { JourneyRecorder, Socket, prefetchAsrSession } = await audioModule(async () => {
+    calls.push('session'); return managedSession
+  }, { managed: true })
+  assert.equal(await prefetchAsrSession(), managedSession.url)
+  const recorder = new JourneyRecorder('')
+  const starting = recorder.start()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(calls.length, 1)
+  assert.equal(Socket.latest.url, managedSession.url)
+  Socket.latest.receive({ type: 'Begin' })
+  await starting
+  recorder.stop()
+})
+
+test('a stale or failed prefetch falls back to a fresh credential request', async () => {
+  const calls = []
+  const mod = await audioModule(async () => {
+    calls.push('session')
+    if (calls.length === 1) throw new Error('offline')
+    return { url: `wss://example.test/v1/asr/realtime?token=session-${calls.length}` }
+  }, { managed: true })
+  assert.equal(await mod.prefetchAsrSession(), '')
+  assert.equal(calls.length, 1)
+  const recorder = new mod.JourneyRecorder('')
+  const starting = recorder.start()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(calls.length, 2)
+  assert.equal(mod.Socket.latest.url, 'wss://example.test/v1/asr/realtime?token=session-2')
+  mod.Socket.latest.receive({ type: 'Begin' })
+  await starting
+  recorder.stop()
+
+  const second = await audioModule(async () => { calls.push('utc'); return { url: 'wss://example.test/v1/asr/realtime?token=fresh' } }, { managed: true })
+  vm.runInContext('Date.now = () => 1000', second.ctx)
+  await second.prefetchAsrSession()
+  vm.runInContext(`Date.now = () => ${1000 + 40001}`, second.ctx)
+  const stale = new second.JourneyRecorder('')
+  const staleStart = stale.start()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(calls.at(-1), 'utc')
+  assert.equal(second.Socket.latest.url, 'wss://example.test/v1/asr/realtime?token=fresh')
+  second.Socket.latest.receive({ type: 'Begin' })
+  await staleStart
+  stale.stop()
+})
+
+test('prefetching is skipped when ASR is not managed', async () => {
+  let calls = 0
+  const { prefetchAsrSession } = await audioModule(async () => { calls++; return managedSession }, { managed: false })
+  assert.equal(await prefetchAsrSession(), '')
+  assert.equal(calls, 0)
 })
 
 test('managed ASR sends 500 ms little endian PCM and flushes the remainder before Terminate', async () => {

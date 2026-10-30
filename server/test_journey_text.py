@@ -1,3 +1,4 @@
+import asyncio
 import json
 import unittest
 from unittest.mock import patch
@@ -188,6 +189,59 @@ class JourneyTextTests(unittest.IsolatedAsyncioTestCase):
                 await journey_text.compose(journey_text.ComposeRequest(transcript=RAW, topic="story"))
             self.assertEqual(caught.exception.detail["code"], "text_not_configured")
             client.assert_not_called()
+
+    async def stream_events(self, handler):
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        with patch.object(journey_text, "configuration", return_value=CONFIG), patch.object(journey_text.httpx, "AsyncClient", return_value=client):
+            response = await journey_text.compose_stream(journey_text.ComposeRequest(transcript=RAW, topic="product"))
+            return [json.loads(chunk) async for chunk in response.body_iterator]
+
+    async def test_stream_sends_the_draft_before_the_editorial_pass_finishes(self):
+        calls, release = [], asyncio.Event()
+
+        async def handler(request):
+            calls.append(json.loads(request.content))
+            if len(calls) == 1:
+                return httpx.Response(200, json={'choices': [{'message': {'content': json.dumps(NOTE, ensure_ascii=False)}}]})
+            await release.wait()
+            return httpx.Response(200, json={'choices': [{'message': {'content': json.dumps(NOTE, ensure_ascii=False)}}]})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        with patch.object(journey_text, "configuration", return_value=CONFIG), patch.object(journey_text.httpx, "AsyncClient", return_value=client):
+            response = await journey_text.compose_stream(journey_text.ComposeRequest(transcript=RAW, topic="product"))
+            iterator = response.body_iterator.__aiter__()
+            draft = json.loads(await iterator.__anext__())
+            self.assertEqual(draft['stage'], 'draft')
+            self.assertFalse(draft['reviewed'])
+            self.assertEqual(draft['note_text'], NOTE['summary'])
+            self.assertFalse(release.is_set())
+            release.set()
+            rest = [json.loads(chunk) async for chunk in iterator]
+        self.assertEqual([event['stage'] for event in rest], ['final'])
+        self.assertTrue(rest[0]['reviewed'])
+        self.assertEqual(rest[0]['note_text'], NOTE['summary'])
+        self.assertEqual(len(calls), 2)
+
+    async def test_stream_keeps_the_draft_when_the_review_is_unavailable(self):
+        calls = []
+
+        def handler(request):
+            calls.append(request)
+            if len(calls) == 1:
+                return httpx.Response(200, json={'choices': [{'message': {'content': json.dumps(NOTE, ensure_ascii=False)}}]})
+            return httpx.Response(503, text='private-provider-diagnostics')
+
+        events = await self.stream_events(handler)
+        self.assertEqual([event['stage'] for event in events], ['draft', 'final'])
+        self.assertFalse(events[-1]['reviewed'])
+        self.assertIn('一轮整理', events[-1]['warning'])
+        self.assertEqual(events[-1]['note_text'], NOTE['summary'])
+        self.assertNotIn('private-provider-diagnostics', json.dumps(events, ensure_ascii=False))
+
+    async def test_stream_reports_an_error_event_when_no_note_is_usable(self):
+        events = await self.stream_events(lambda request: httpx.Response(200, json={'choices': [{'message': {'content': '{"summary": "呃"}'}}]}))
+        self.assertEqual([event['stage'] for event in events], ['error'])
+        self.assertEqual(events[0]['detail']['code'], 'text_invalid_result')
 
     def test_filler_repetition_wrong_direction_and_fabricated_evidence_are_rejected(self):
         for change in [

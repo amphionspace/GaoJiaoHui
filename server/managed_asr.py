@@ -1,4 +1,5 @@
 """Local-only FourHz credentials and browser sessions; never expose the long-lived key."""
+import asyncio
 import hashlib
 import hmac
 import json
@@ -14,6 +15,22 @@ from fastapi import HTTPException
 COOKIE = 'journey_local_session'
 _SIGNING_KEY = secrets.token_bytes(32)
 LOCAL_HOSTS = {'127.0.0.1', 'localhost', '::1'}
+# 临时凭证本身有效期 60 秒；签发一次约需 1 秒，此前每个录音会话（以及每次访问
+# 校验）都要重新签发，占掉「点击开始说话 -> 可以说话」这段关键路径。凭证只用于
+# 建立 WS 握手，40 秒内复用仍留有 20 秒连接余量。
+SESSION_REUSE_SECONDS = 40
+_token_cache = {'fingerprint': None, 'token': '', 'expires': 0.0}
+_token_locks = {}
+
+
+def _token_lock():
+    # asyncio locks bind to the loop that first uses them; keep one per loop so
+    # tests (one loop per case) and the server (one loop) both stay valid.
+    loop = asyncio.get_running_loop()
+    lock = _token_locks.get(loop)
+    if lock is None:
+        lock = _token_locks[loop] = asyncio.Lock()
+    return lock
 
 
 def local_ports():
@@ -109,8 +126,35 @@ def require_session(request):
     return 'managed:' + hashlib.sha256(configuration()['api_key'].encode()).hexdigest()
 
 
-async def mint_token():
-    config = configuration()
+def _fingerprint(config):
+    return hashlib.sha256((config['base_url'] + '\0' + config['api_key']).encode()).hexdigest()
+
+
+def reset_session_cache():
+    """Test hook: forget any reused temporary token."""
+    _token_cache.update(fingerprint=None, token='', expires=0.0)
+
+
+def _reusable(fingerprint):
+    return (_token_cache['fingerprint'] == fingerprint and _token_cache['token']
+            and _token_cache['expires'] > time.monotonic())
+
+
+async def mint_token(config=None):
+    config = config or configuration()
+    fingerprint = _fingerprint(config)
+    if _reusable(fingerprint):
+        return _token_cache['token']
+    async with _token_lock():
+        if _reusable(fingerprint):
+            return _token_cache['token']
+        token = await _request_token(config)
+        _token_cache.update(fingerprint=fingerprint, token=token,
+                            expires=time.monotonic() + SESSION_REUSE_SECONDS)
+        return token
+
+
+async def _request_token(config):
     try:
         async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
             response = await client.get(config['base_url'] + '/v1/token',
@@ -134,6 +178,7 @@ async def mint_token():
 
 
 async def session_url():
-    token = await mint_token()
-    base = configuration()['base_url'].replace('https://', 'wss://', 1)
+    config = configuration()
+    token = await mint_token(config)
+    base = config['base_url'].replace('https://', 'wss://', 1)
     return base + '/v1/asr/realtime?' + urlencode({'speech_model': 'fourhz-spectrum', 'token': token})
