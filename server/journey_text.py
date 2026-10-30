@@ -21,6 +21,8 @@ CONFIG_FILE = Path(__file__).resolve().parents[1] / ".env.journey.json"
 # The provider counts internal reasoning toward this budget as well as the JSON.
 MAX_COMPLETION_TOKENS = 4096
 MAX_REPLY_CHARS = 50
+# Provider-side overload responses worth one short retry (503 "service is too busy").
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 TOPICS = {"future": "和2036对话：十年后对科技、生活的想象和期待，那时希望自己在做什么", "product": "最惊喜的产品", "idea": "一个新想法", "story": "今天的故事"}
 TOPICS_EN = {"future": "A conversation with 2036: what technology, life, and your own work may become in ten years", "product": "The technology or product that surprised you most", "idea": "A new idea", "story": "A story from today"}
 DISALLOWED_MESSAGE_PHRASES = (
@@ -266,8 +268,15 @@ async def compose_notes(request, config=None):
     deadline = time.monotonic() + 82
     async with httpx.AsyncClient(timeout=40, trust_env=not local_model) as client:
         async def post(payload):
-            return await asyncio.wait_for(client.post(config["url"], headers=headers, json=payload),
-                                          timeout=min(40, max(0.01, deadline - time.monotonic())))
+            # The provider answers 503 "service is too busy" intermittently; one
+            # short retry saves a whole note without meaningfully changing latency.
+            for retry in range(2):
+                response = await asyncio.wait_for(client.post(config["url"], headers=headers, json=payload),
+                                                  timeout=min(40, max(0.01, deadline - time.monotonic())))
+                if response.status_code not in RETRYABLE_STATUS or retry:
+                    return response
+                await asyncio.sleep(0.6)
+            return response
         for attempt in range(2):
             response = await post({
                 "model": config["model"], "messages": messages,

@@ -175,7 +175,21 @@ class JourneyTextTests(unittest.IsolatedAsyncioTestCase):
             await self.invoke(handler)
         self.assertEqual(caught.exception.detail['code'], 'text_review_failed')
         self.assertNotIn('test-only-key', str(caught.exception.detail))
-        self.assertEqual(len(calls), 2)
+        # Generation, then the review attempt plus its one overload retry.
+        self.assertEqual(len(calls), 3)
+
+    async def test_transient_upstream_overload_is_retried_once(self):
+        calls = []
+
+        def handler(request):
+            calls.append(request)
+            if len(calls) == 1:
+                return httpx.Response(503, json={'error': {'message': 'Service is too busy'}})
+            return httpx.Response(200, json={'choices': [{'message': {'content': json.dumps(NOTE, ensure_ascii=False)}}]})
+
+        result = await self.invoke(handler)
+        self.assertEqual(result['summary'], NOTE['summary'])
+        self.assertEqual(len(calls), 3)
 
     async def test_no_credentials_are_forwarded_in_upstream_error(self):
         with self.assertRaises(HTTPException) as caught:

@@ -51,7 +51,7 @@ GAOJIAOHUI_BACKEND_URL=http://127.0.0.1:8767 npm run dev -- --host 127.0.0.1 --p
 
 测试入口：http://127.0.0.1:5173/ 。工作人员设置内的检查按钮可确认 DeepSeek 配置与独立模型就绪状态。其他模块仍默认走 `/proxy`。
 
-DeepSeek 配置位于根目录 `.env.journey.json`，权限为 600，已被 Git 忽略。使用 `url`、`model`、`api_key` 三个字段，结构见 `server/journey-config.example.json`。密钥不进入前端和交付文档；文件每次请求读取，无需重启。当前保存的模型为 `deepseek-flash`。
+DeepSeek 配置位于根目录 `.env.journey.json`，权限为 600，已被 Git 忽略。使用 `url`、`model`、`api_key` 三个字段，结构见 `server/journey-config.example.json`。密钥不进入前端和交付文档；文件每次请求读取，无需重启。当前保存的模型为 `deepseek-chat`（非推理）。此前用过 `deepseek-flash`：它是推理模型，reasoning 与正文共用 `max_tokens`，长或杂乱的讲述会把 4096 全部用在 reasoning 上并返回空正文（`finish_reason=length`、`content` 为空），表现为“整理一直失败”。若要换回推理模型，需同时把 `MAX_COMPLETION_TOKENS` 提到 8192 以上，并接受单次 30–60 秒的时延。
 
 ## 运维与回滚
 
