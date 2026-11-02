@@ -113,6 +113,19 @@ test('admin includes current API failures even when request history is empty', a
   assert.match(banner.innerHTML, /暂无接口错误/)
 })
 
+test('admin reports a failed interface probe in the error bar', async () => {
+  const fixture = await dashboard(stats({ checks: {
+    frontend: { ok: true, built: true },
+    api: { ok: false, checked: 7, failed: ['/api/journey/compose/stream'], detail: '/api/journey/compose/stream HTTP 500' },
+  } }))
+  const banner = fixture.elements.get('alert')
+  assert.match(banner.innerHTML, /当前 · 接口可用性：\/api\/journey\/compose\/stream HTTP 500/)
+  assert.match(fixture.elements.get('status').innerHTML, /接口可用性/)
+  fixture.response = stats({ checks: { api: { ok: true, checked: 7, failed: [], detail: '接口可用' } } })
+  await fixture.elements.get('refresh').listeners.click()
+  assert.match(banner.innerHTML, /暂无接口错误/)
+})
+
 test('admin escapes interface error text in the banner and history', async () => {
   const error = { at: '11:29:00', path: '/api/<img src=x onerror=alert(1)>', status: 503, code: '<script>alert(1)</script>' }
   const data = stats({ interface_errors: [error] })

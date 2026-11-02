@@ -20,6 +20,7 @@ REMIND_SECONDS = 1800
 CHECK_LABELS = {
     'service': '服务可达性',
     'frontend': '前端构建',
+    'api': '接口可用性',
     'text': '文本模型',
     'asr': '语音识别',
     'tts': '声音合成',
@@ -34,6 +35,8 @@ def load_health(url, timeout=5):
 
 
 def check_detail(name, check):
+    if name == 'api':
+        return str(check.get('detail') or '接口可用')
     if name == 'disk':
         return '磁盘 ' + str(check.get('percent')) + '%（剩余 ' + str(check.get('free_gb')) + 'G）'
     if name == 'text':

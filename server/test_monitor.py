@@ -131,3 +131,17 @@ class WebhookPayloadTests(unittest.TestCase):
     def test_text_detail_reports_a_missing_balance(self):
         detail = monitor.check_detail('text', {'ok': False, 'primary_ok': False, 'balance': -0.02})
         self.assertIn('-0.02', detail)
+
+
+class InterfaceCheckTests(unittest.TestCase):
+    def test_failed_interface_probe_is_reported_with_its_routes(self):
+        parsed = monitor.checks_from(health('degraded', api={
+            'ok': False, 'checked': 7, 'failed': ['/api/journey/compose'],
+            'detail': '/api/journey/compose HTTP 500'}))
+        self.assertEqual(parsed, [('api', False, '/api/journey/compose HTTP 500')])
+        self.assertEqual(monitor.CHECK_LABELS['api'], '接口可用性')
+
+    def test_healthy_interface_probe_is_quiet(self):
+        parsed = monitor.checks_from(health('ok', api={'ok': True, 'detail': '接口可用'}))
+        self.assertEqual(parsed, [('api', True, '接口可用')])
+        self.assertEqual(monitor.decide({}, parsed, 1000.0), [])

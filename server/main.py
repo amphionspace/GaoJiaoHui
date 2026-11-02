@@ -188,6 +188,8 @@ async def collect_metrics(request, call_next):
         return await call_next(request)
     if path.startswith(('/api/admin', '/api/health')):
         return await call_next(request)
+    if request.headers.get(PROBE_HEADER):
+        return await call_next(request)
     started = time.perf_counter()
     status = 500
     try:
@@ -201,6 +203,75 @@ async def collect_metrics(request, call_next):
 def frontend_check():
     built = os.path.isfile(os.path.join(DIST, 'index.html'))
     return {'ok': built, 'built': built}
+
+
+PROBE_HEADER = 'x-journey-probe'
+# In-process availability probe: every entry must stay side-effect free. Routes
+# behind compose_access answer 401/429 without a key, which still proves that
+# the route is mounted, its imports loaded and the access layer works.
+PROBE_ROUTES = (
+    ('GET', '/', None),
+    ('GET', '/api/config', None),
+    ('GET', '/api/journey/tts/v1/audio/voices', None),
+    ('POST', '/api/journey/compose', {}),
+    ('POST', '/api/journey/compose/stream', {}),
+    ('POST', '/api/journey/illustrate', {}),
+    ('POST', '/api/journey/asr-session', None),
+)
+INTERFACE_PATHS = {
+    'frontend': '/',
+    'text': '/api/journey/compose/stream',
+    'asr': '/api/journey/asr-session',
+    'tts': '/api/journey/tts/v1/audio/speech',
+    'image': '/api/journey/illustrate',
+}
+HEALTH_RECORD_COOLDOWN = 900
+_health_recorded = {}
+
+
+async def api_check():
+    """Call our own routes in-process; only 5xx and transport errors are failures."""
+    failed, details = [], []
+    transport = httpx.ASGITransport(app=app, client=('127.0.0.2', 1))
+    async with httpx.AsyncClient(transport=transport, base_url='http://health-probe',
+                                 timeout=5, trust_env=False) as client:
+        for method, path, body in PROBE_ROUTES:
+            try:
+                response = await client.request(method, path, json=body,
+                                                headers={PROBE_HEADER: '1'})
+                if response.status_code >= 500:
+                    failed.append(path)
+                    details.append(path + ' HTTP ' + str(response.status_code))
+            except Exception as error:  # noqa: BLE001 - a broken route must not break health
+                failed.append(path)
+                details.append(path + ' ' + type(error).__name__)
+    return {'ok': not failed, 'checked': len(PROBE_ROUTES), 'failed': failed,
+            'detail': '、'.join(details)[:160] or '接口可用'}
+
+
+def record_health_failures(checks):
+    """Copy failed probes into the interface error list so banner and alerts agree."""
+    now = time.time()
+    for name, check in checks.items():
+        if check.get('ok') is not False:
+            _health_recorded.pop(name, None)
+            if name == 'api':
+                for key in [key for key in _health_recorded if key.startswith('api:')]:
+                    del _health_recorded[key]
+            continue
+        if name == 'api':
+            for path in check.get('failed') or []:
+                key = 'api:' + path
+                if now - _health_recorded.get(key, 0) < HEALTH_RECORD_COOLDOWN:
+                    continue
+                _health_recorded[key] = now
+                metrics_store.error(path, 503, 'api_unavailable')
+            continue
+        path = INTERFACE_PATHS.get(name)
+        if not path or now - _health_recorded.get(name, 0) < HEALTH_RECORD_COOLDOWN:
+            continue
+        _health_recorded[name] = now
+        metrics_store.error(path, 503, 'health_' + name)
 
 
 TEXT_DOWN_CODES = {'text_balance', 'text_upstream_error', 'text_auth', 'text_timeout', 'text_connection_failed'}
@@ -232,6 +303,8 @@ def image_check():
     codes = [str(item.get('code', '')) for item in recent]
     last = metrics_store.last_status('/api/journey/illustrate')
     detail = '额度不足' if 'illustrate_quota' in codes else ('' if last < 400 else 'HTTP ' + str(last))
+    if not last:
+        detail = '启动后未使用'
     return {'ok': last < 400, 'recent_failures': len(recent), 'detail': detail, 'last_status': last}
 
 
@@ -270,21 +343,24 @@ def disk_check():
 
 
 async def health_checks():
-    return {
+    checks = {
         'frontend': frontend_check(),
+        'api': await api_check(),
         'text': await text_check(),
         'asr': await asr_check(),
         'tts': await tts_check(),
         'image': image_check(),
         'disk': disk_check(),
     }
+    record_health_failures(checks)
+    return checks
 
 
 def health_status(checks):
     return 'ok' if all(item['ok'] for item in checks.values()) else 'degraded'
 
 
-ALERT_LABELS = {'frontend': '前端构建', 'text': '文本服务', 'asr': '语音识别',
+ALERT_LABELS = {'frontend': '前端构建', 'api': '接口可用性', 'text': '文本服务', 'asr': '语音识别',
                 'tts': '声音合成', 'image': '插画服务', 'disk': '磁盘'}
 
 
@@ -302,6 +378,8 @@ def build_alerts(checks, snapshot):
                 detail = '主模型与兜底均不可用'
             else:
                 detail = '配置不完整'
+        elif name == 'api':
+            detail = str(check.get('detail') or '接口不可用')[:120]
         elif name == 'asr':
             detail = str(check.get('detail') or '语音识别探针失败')
         elif name == 'tts':
@@ -712,13 +790,13 @@ details.session summary .s-meta{color:var(--dim);font-size:11px;white-space:nowr
   </section>
   <section class="card"><h2>接口</h2><div id="paths"></div><p class="note">流式接口（compose/stream）的时延为首字节时间；草稿与终版的实际时延见上方“阶段时延”。</p></section>
   <section class="card"><h2>接口错误记录</h2><div id="errors"></div></section>
-  <footer>看板默认只统计聚合数据；会话记录可在服务器开启并自动过期，音频始终不保存。企业微信告警由 journey-monitor.timer 每分钟检查并推送，需在 /etc/amphion-gjh/monitor.env 配置 JOURNEY_ALERT_WEBHOOK；未配置时只在本页提示。</footer>
+  <footer>看板默认只统计聚合数据；会话记录可在服务器开启并自动过期，音频始终不保存。接口可用性由本机进程每分钟探测，失败会写入上方“接口错误”。飞书/企业微信告警由 journey-monitor.timer 每分钟检查并推送，需在 /etc/amphion-gjh/monitor.env 配置 JOURNEY_ALERT_WEBHOOK；未配置时只在本页提示。</footer>
 </main>
 <script>
 const $ = id => document.getElementById(id)
 const esc = value => String(value == null ? '' : value).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
 const dot = ok => '<span class="dot ' + (ok ? 'ok' : 'bad') + '"></span>'
-const CHECK_LABELS = { frontend: '前端构建', text: '文本模型', asr: '语音识别', tts: '声音合成', image: '插画服务', disk: '磁盘' }
+const CHECK_LABELS = { frontend: '前端构建', api: '接口可用性', text: '文本模型', asr: '语音识别', tts: '声音合成', image: '插画服务', disk: '磁盘' }
 const TOPIC_LABELS = { future: '未来', product: '产品', idea: '想法', story: '故事' }
 let openSessions = new Set()
 const EVENT_LABELS = { compose_draft: '草稿上屏', compose_final: '审校完成', compose_review_fallback: '审校回退', compose_error: '整理失败', asr_session: '语音会话', illustrate: '插画请求', illustrate_error: '插画失败', tts_amphion_ok: '自建TTS成功', tts_amphion_fail: '自建TTS失败', tts_no_sample: '无参考音', tts_failover: '降级百炼', text_failover: '文本降级', tts_bailian_ok: '百炼成功', tts_bailian_fail: '百炼失败' }
@@ -730,6 +808,7 @@ function detail(name, check) {
     return chain
   }
   if (name === 'asr') return check.detail || ''
+  if (name === 'api') return check.detail || (check.checked ? check.checked + ' 个接口' : '')
   if (name === 'tts') {
     const parts = [check.provider || '']
     if (check.amphion_ready) parts.push('自建就绪')
@@ -749,7 +828,7 @@ function uptime(seconds) {
   if (hours) return '已运行 ' + hours + ' 小时 ' + minutes + ' 分'
   return '已运行 ' + minutes + ' 分'
 }
-const ERROR_REASONS = { illustrate_quota: '插画服务额度不足', text_balance: '文本模型余额不足', text_auth: '文本模型鉴权失败', text_timeout: '文本模型请求超时', text_connection_failed: '文本模型连接失败', text_invalid_result: '文本模型返回内容校验失败', text_upstream_error: '文本模型上游请求失败' }
+const ERROR_REASONS = { api_unavailable: '接口不可用', health_frontend: '前端构建异常', health_text: '文本接口异常', health_asr: '语音识别异常', health_tts: '声音合成异常', health_image: '插画接口异常', illustrate_quota: '插画服务额度不足', text_balance: '文本模型余额不足', text_auth: '文本模型鉴权失败', text_timeout: '文本模型请求超时', text_connection_failed: '文本模型连接失败', text_invalid_result: '文本模型返回内容校验失败', text_upstream_error: '文本模型上游请求失败' }
 function renderErrorBar(messages) {
   const box = $('alert')
   box.className = 'card error-banner' + (messages.length ? ' alert' : '')
@@ -760,7 +839,7 @@ function renderErrorBar(messages) {
     (messages.length ? '<ul>' + messages.map(message => '<li>' + esc(message) + '</li>').join('') + '</ul>' : '')
 }
 function render(data) {
-  const currentErrors = ['text', 'asr', 'tts', 'image'].flatMap(name => {
+  const currentErrors = ['api', 'text', 'asr', 'tts', 'image'].flatMap(name => {
     const check = (data.checks || {})[name]
     if (!check || check.ok !== false) return []
     const reason = check.detail || detail(name, check) || '接口检查失败'
