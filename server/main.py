@@ -583,6 +583,7 @@ async def admin_stats():
         'release': os.path.basename(ROOT), 'version': VERSION, 'status': health_status(checks),
         'processed_at': time.strftime('%Y-%m-%d %H:%M:%S'),
         'uptime_seconds': snapshot['uptime_seconds'], 'checks': checks, 'stats': snapshot,
+        'interface_errors': metrics_store.recent_errors(900),
         'alerts': build_alerts(checks, snapshot),
     }
 
@@ -701,7 +702,7 @@ details.session summary .s-meta{color:var(--dim);font-size:11px;white-space:nowr
     <p class="note" id="session-note"></p>
   </section>
   <section class="card"><h2>接口</h2><div id="paths"></div><p class="note">流式接口（compose/stream）的时延为首字节时间；草稿与终版的实际时延见上方“阶段时延”。</p></section>
-  <section class="card"><h2>最近错误</h2><div id="errors"></div></section>
+  <section class="card"><h2>接口错误记录</h2><div id="errors"></div></section>
   <footer>看板默认只统计聚合数据；会话记录可在服务器开启并自动过期，音频始终不保存。企业微信告警由 journey-monitor.timer 每分钟检查并推送，需在 /etc/amphion-gjh/monitor.env 配置 JOURNEY_ALERT_WEBHOOK；未配置时只在本页提示。</footer>
 </main>
 <script>
@@ -740,11 +741,13 @@ function uptime(seconds) {
   return '已运行 ' + minutes + ' 分'
 }
 function render(data) {
-  const alerts = data.alerts || []
+  const errors = data.interface_errors || []
   const box = $('alert')
-  if (alerts.length) {
+  if (errors.length) {
     box.hidden = false
-    box.innerHTML = '<b>需要处理</b><ul>' + alerts.map(item => '<li>' + esc(item) + '</li>').join('') + '</ul>'
+    box.innerHTML = '<b>接口错误（最近 15 分钟）</b><ul>' + errors.map(item =>
+      '<li>' + esc(item.at || '') + ' · ' + esc(item.path || '') + ' · HTTP ' + esc(String(item.status || '')) +
+      (item.code ? ' · ' + esc(item.code) : '') + '</li>').join('') + '</ul>'
   } else {
     box.hidden = true
   }
