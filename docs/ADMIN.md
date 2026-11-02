@@ -27,9 +27,11 @@ JOURNEY_ADMIN_PASSWORD=<长随机密码>
 
 修改后 `systemctl restart amphion-gjh`。未配置账号时 `/admin` 与 `/metrics` 返回 503，不会暴露数据。
 
-- 认证方式为 HTTP Basic，必须走 HTTPS。
-- 经 Caddy 反代时应用看到的来源是 `127.0.0.1`，此时才会采信 `X-Forwarded-For` 的第一个地址做白名单判断。
-- 浏览器会缓存 Basic 凭据；改密码后关掉浏览器或换无痕窗口再登录。
+- `/admin` 使用站内登录页（不再弹浏览器 Basic 对话框）：提交账号密码后写入 `journey_admin_session` 会话 Cookie（HttpOnly、SameSite=Strict、12 小时），右上角可“退出”。
+- 必须走 HTTPS；经 Caddy 反代时应用看到的来源是 `127.0.0.1`，此时才会采信 `X-Forwarded-For` 的第一个地址做白名单判断。
+- 同一来源 10 分钟内密码错误 10 次会暂时拒绝登录（429）。
+- `/metrics`、脚本和 curl 仍支持 HTTP Basic（Prometheus 可用 `basic_auth`）；后台页面本身不再发送 `WWW-Authenticate`，所以不会出现系统弹窗。
+- 改密码后重启服务，旧会话立即失效。
 
 ## 看板怎么读
 
@@ -107,7 +109,7 @@ sudo -u amphion-gjh /usr/bin/python3 /opt/amphion-gjh/bin/journey-monitor.py --d
 
 ## 常见问题
 
-- **打开 `/admin` 提示 401**：浏览器缓存的旧密码；关闭浏览器或换无痕窗口。
+- **打开 `/admin` 一直是登录页**：会话 Cookie 过期（12 小时）或改过密码；重新登录即可。
 - **503 后台未启用**：`admin.env` 未创建或没有加进 drop-in。
 - **磁盘一直标红**：当前根分区使用率 98%，阈值 95%。清理旧 release / Docker 镜像或扩容后自动恢复。
 - **计数看起来很小**：计数随服务重启归零，属于预期；长期趋势应接 Prometheus 抓 `/metrics`。

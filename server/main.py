@@ -17,6 +17,9 @@
     cd frontend && npm run dev        # Vite 5173，/proxy 自动转发到 8766
 """
 import base64
+import hashlib
+import hmac
+import html as html_lib
 import os
 import secrets
 import shutil
@@ -35,7 +38,7 @@ from fastapi import FastAPI, Request, Response, HTTPException, Depends, File, Fo
 from fastapi import UploadFile as APIUploadFile
 from starlette.datastructures import UploadFile
 
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 try:
@@ -245,36 +248,84 @@ def health_status(checks):
     return 'ok' if all(item['ok'] for item in checks.values()) else 'degraded'
 
 
+ADMIN_COOKIE = 'journey_admin_session'
+ADMIN_SESSION_SECONDS = 12 * 3600
+_admin_failures = {}
+
+
 def admin_credentials():
     return os.environ.get('JOURNEY_ADMIN_USER', '').strip(), os.environ.get('JOURNEY_ADMIN_PASSWORD', '')
 
 
-def _auth_error(detail='需要后台账号。'):
-    return HTTPException(401, detail, headers={'WWW-Authenticate': 'Basic realm="journey-admin"'})
+def admin_source(request):
+    peer = request.client.host if request.client else ''
+    forwarded = request.headers.get('x-forwarded-for', '').split(',')[0].strip()
+    # Only trust the forwarding header when the direct peer is the local proxy.
+    return (forwarded or peer) if peer in ('127.0.0.1', '::1') else peer
+
+
+def check_admin_source(request):
+    allowed = [ip.strip() for ip in os.environ.get('JOURNEY_ADMIN_IPS', '').split(',') if ip.strip()]
+    if allowed and admin_source(request) not in allowed:
+        raise HTTPException(403, '后台只允许指定来源访问。')
+
+
+def admin_signature(expires, user, password):
+    return hmac.new((user + '\0' + password).encode(), expires.encode(), hashlib.sha256).hexdigest()
+
+
+def admin_cookie_value(user, password):
+    expires = str(int(time.time()) + ADMIN_SESSION_SECONDS)
+    return expires + '.' + admin_signature(expires, user, password)
+
+
+def admin_session_valid(request, user, password):
+    raw = request.cookies.get(ADMIN_COOKIE, '')
+    try:
+        expires, signature = raw.split('.', 1)
+        return int(expires) > time.time() and hmac.compare_digest(signature, admin_signature(expires, user, password))
+    except (ValueError, TypeError):
+        return False
+
+
+def admin_basic_valid(request, user, password):
+    header = request.headers.get('authorization', '')
+    if not header.lower().startswith('basic '):
+        return False
+    try:
+        decoded = base64.b64decode(header.split(' ', 1)[1], validate=True).decode('utf-8')
+    except (ValueError, UnicodeDecodeError):
+        return False
+    got_user, _, got_password = decoded.partition(':')
+    return secrets.compare_digest(got_user, user) and secrets.compare_digest(got_password, password)
+
+
+def is_https(request):
+    if request.url.scheme == 'https':
+        return True
+    return request.headers.get('x-forwarded-proto', '').split(',')[0].strip().lower() == 'https'
+
+
+def login_blocked(source):
+    now = time.time()
+    attempts = [stamp for stamp in _admin_failures.get(source, []) if now - stamp < 600]
+    _admin_failures[source] = attempts
+    return len(attempts) >= 10
+
+
+def record_login_failure(source):
+    _admin_failures.setdefault(source, []).append(time.time())
+
 
 def require_admin(request: Request):
     user, password = admin_credentials()
     if not user or not password:
         raise HTTPException(503, '后台未启用：请配置 JOURNEY_ADMIN_USER 与 JOURNEY_ADMIN_PASSWORD。')
-    allowed = [ip.strip() for ip in os.environ.get('JOURNEY_ADMIN_IPS', '').split(',') if ip.strip()]
-    if allowed:
-        peer = request.client.host if request.client else ''
-        forwarded = request.headers.get('x-forwarded-for', '').split(',')[0].strip()
-        # Only trust the forwarding header when the direct peer is the local proxy.
-        source = (forwarded or peer) if peer in ('127.0.0.1', '::1') else peer
-        if source not in allowed:
-            raise HTTPException(403, '后台只允许指定来源访问。')
-    header = request.headers.get('authorization', '')
-    if not header.lower().startswith('basic '):
-        raise _auth_error('请输入后台账号。')
-    try:
-        decoded = base64.b64decode(header.split(' ', 1)[1], validate=True).decode('utf-8')
-    except (ValueError, UnicodeDecodeError):
-        raise _auth_error('后台账号无效。') from None
-    got_user, _, got_password = decoded.partition(':')
-    if not (secrets.compare_digest(got_user, user) and secrets.compare_digest(got_password, password)):
-        raise _auth_error('账号或密码不正确。')
-    return got_user
+    check_admin_source(request)
+    if admin_session_valid(request, user, password) or admin_basic_valid(request, user, password):
+        return user
+    # Never send a WWW-Authenticate challenge: the dashboard has its own login page.
+    raise HTTPException(401, '请先登录后台。')
 
 
 @app.api_route("/proxy/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
@@ -511,6 +562,7 @@ details.session summary .s-meta{color:var(--dim);font-size:11px;white-space:nowr
     <span id="meta-release">-</span><span id="meta-version">-</span>
     <span id="meta-uptime">-</span><span id="meta-updated">-</span>
     <button id="refresh" type="button">立即刷新</button>
+    <form method="post" action="/admin/logout" style="margin:0"><button type="submit">退出</button></form>
   </div>
 </header>
 <main>
@@ -679,9 +731,90 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) { re
 </html>"""
 
 
-@app.get('/admin', dependencies=[Depends(require_admin)])
-async def admin_page():
-    return HTMLResponse(ADMIN_PAGE, headers={'Cache-Control': 'no-store'})
+LOGIN_PAGE = """<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>登录 · 和 2036 对话</title>
+<style>
+:root{--bg:#f6f3ec;--card:#fff;--line:#e3ddd0;--ink:#2a3e35;--dim:#7c8a83;--acc:#305b4b;--bad:#c4553b}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 18% 8%,#eaf1e9,transparent 55%),var(--bg);color:var(--ink);font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+.login{width:100%;max-width:420px;padding:24px}
+.brand{display:flex;align-items:baseline;gap:8px;justify-content:center;margin-bottom:16px;color:var(--acc);font-weight:650;font-size:15px}
+.brand small{font-weight:400;color:var(--dim);font-size:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:26px 24px 22px;box-shadow:0 18px 50px #305b4b14}
+h1{font-size:20px;margin:0 0 6px}
+.hint{color:var(--dim);font-size:12px;margin:0 0 18px}
+label{display:block;font-size:12px;color:var(--dim);margin:12px 0}
+input{display:block;width:100%;margin-top:6px;padding:11px 12px;border:1px solid #cfdad2;border-radius:8px;font:14px/1.4 inherit;background:#fff;color:var(--ink)}
+input:focus{outline:2px solid #305b4b33;border-color:var(--acc)}
+button{width:100%;margin-top:18px;padding:11px 14px;border:0;border-radius:8px;background:var(--acc);color:#fff;font-size:14px;font-weight:600;cursor:pointer}
+button:hover{filter:brightness(1.08)}
+.error{color:var(--bad);font-size:12px;margin:10px 0 0;min-height:18px}
+footer{text-align:center;color:var(--dim);font-size:11px;margin-top:14px}
+</style>
+</head>
+<body>
+<main class="login">
+  <div class="brand">和 2036 对话 <small>运维看板</small></div>
+  <form class="card" method="post" action="/admin/login">
+    <h1>登录后台</h1>
+    <p class="hint">账号在服务器 /etc/amphion-gjh/admin.env；登录状态保持 12 小时。</p>
+    <label>账号<input name="user" value="admin" autocomplete="username" required></label>
+    <label>密码<input type="password" name="password" autocomplete="current-password" required autofocus></label>
+    <!--ERROR-->
+    <button type="submit">进入看板</button>
+  </form>
+  <footer>仅限现场运维使用；会话内容按保留期自动清理。</footer>
+</main>
+</body>
+</html>"""
+
+
+@app.get('/admin')
+async def admin_page(request: Request):
+    user, password = admin_credentials()
+    if not user or not password:
+        return HTMLResponse('<!doctype html><meta charset="utf-8"><title>后台未启用</title>'
+                            '<p style="font:14px sans-serif;padding:24px">后台未启用：请配置 JOURNEY_ADMIN_USER 与 JOURNEY_ADMIN_PASSWORD。</p>',
+                            status_code=503)
+    check_admin_source(request)
+    if admin_session_valid(request, user, password) or admin_basic_valid(request, user, password):
+        return HTMLResponse(ADMIN_PAGE, headers={'Cache-Control': 'no-store'})
+    return HTMLResponse(LOGIN_PAGE, headers={'Cache-Control': 'no-store'})
+
+
+@app.post('/admin/login')
+async def admin_login(request: Request):
+    user, password = admin_credentials()
+    if not user or not password:
+        return HTMLResponse('后台未启用。', status_code=503)
+    check_admin_source(request)
+    source = admin_source(request)
+    if login_blocked(source):
+        body = LOGIN_PAGE.replace('<!--ERROR-->', '<p class="error">尝试次数过多，请 10 分钟后再试。</p>')
+        return HTMLResponse(body, status_code=429, headers={'Cache-Control': 'no-store'})
+    form = await request.form()
+    got_user = str(form.get('user', '')).strip()
+    got_password = str(form.get('password', ''))
+    if not (secrets.compare_digest(got_user, user) and secrets.compare_digest(got_password, password)):
+        record_login_failure(source)
+        body = LOGIN_PAGE.replace('<!--ERROR-->', '<p class="error">账号或密码不正确。</p>')
+        return HTMLResponse(body, status_code=401, headers={'Cache-Control': 'no-store'})
+    response = RedirectResponse('/admin', status_code=303)
+    response.set_cookie(ADMIN_COOKIE, admin_cookie_value(user, password), max_age=ADMIN_SESSION_SECONDS,
+                        httponly=True, secure=is_https(request), samesite='strict', path='/')
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@app.post('/admin/logout')
+async def admin_logout():
+    response = RedirectResponse('/admin', status_code=303)
+    response.delete_cookie(ADMIN_COOKIE, path='/')
+    return response
 
 
 if os.path.isdir(DIST):

@@ -23,6 +23,9 @@ def client(host='127.0.0.1', client_host='127.0.0.1'):
 
 
 class AdminTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        main._admin_failures.clear()
+
     async def test_admin_is_disabled_without_credentials(self):
         with patch.dict('os.environ', {'JOURNEY_ADMIN_USER': '', 'JOURNEY_ADMIN_PASSWORD': ''}):
             async with client() as api:
@@ -30,18 +33,57 @@ class AdminTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertIn('后台未启用', response.text)
 
-    async def test_admin_requires_basic_auth(self):
+    async def test_admin_page_uses_its_own_login_instead_of_a_browser_dialog(self):
         with patch.dict('os.environ', ADMIN_ENV):
             async with client() as api:
-                missing = await api.get('/admin')
-                wrong = await api.get('/admin', headers=basic(password='wrong'))
+                anonymous = await api.get('/admin')
+                stale_basic = await api.get('/admin', headers=basic(password='wrong'))
                 allowed = await api.get('/admin', headers=basic())
-        self.assertEqual(missing.status_code, 401)
-        self.assertIn('Basic realm="journey-admin"', missing.headers['www-authenticate'])
-        self.assertEqual(wrong.status_code, 401)
+        self.assertEqual(anonymous.status_code, 200)
+        self.assertIn('登录后台', anonymous.text)
+        self.assertNotIn('www-authenticate', anonymous.headers)
+        self.assertEqual(stale_basic.status_code, 200)
+        self.assertIn('登录后台', stale_basic.text)
         self.assertEqual(allowed.status_code, 200)
-        self.assertIn('运维看板', allowed.text)
+        self.assertIn('今日体验', allowed.text)
         self.assertEqual(allowed.headers['cache-control'], 'no-store')
+
+    async def test_login_sets_a_session_cookie_and_unlocks_apis(self):
+        with patch.dict('os.environ', ADMIN_ENV):
+            async with client() as api:
+                denied = await api.get('/api/admin/stats')
+                login = await api.post('/admin/login', data={'user': 'admin', 'password': 'test-admin-password'})
+                dashboard = await api.get('/admin')
+                stats = await api.get('/api/admin/stats')
+                cookie = login.headers['set-cookie']
+        self.assertEqual(denied.status_code, 401)
+        self.assertNotIn('www-authenticate', denied.headers)
+        self.assertEqual(login.status_code, 303)
+        self.assertEqual(login.headers['location'], '/admin')
+        self.assertIn('journey_admin_session=', cookie)
+        self.assertIn('HttpOnly', cookie)
+        self.assertIn('SameSite=strict', cookie)
+        self.assertIn('Path=/', cookie)
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertIn('今日体验', dashboard.text)
+        self.assertEqual(stats.status_code, 200)
+
+    async def test_login_rejects_a_wrong_password_without_a_challenge(self):
+        with patch.dict('os.environ', ADMIN_ENV):
+            async with client() as api:
+                response = await api.post('/admin/login', data={'user': 'admin', 'password': 'wrong'})
+        self.assertEqual(response.status_code, 401)
+        self.assertIn('账号或密码不正确', response.text)
+        self.assertNotIn('www-authenticate', response.headers)
+
+    async def test_logout_clears_the_session_cookie(self):
+        with patch.dict('os.environ', ADMIN_ENV):
+            async with client() as api:
+                await api.post('/admin/login', data={'user': 'admin', 'password': 'test-admin-password'})
+                response = await api.post('/admin/logout')
+        self.assertEqual(response.status_code, 303)
+        self.assertIn('journey_admin_session=', response.headers['set-cookie'])
+        self.assertIn('Max-Age=0', response.headers['set-cookie'])
 
     async def test_stats_expose_aggregates_without_content(self):
         with patch.dict('os.environ', ADMIN_ENV):
