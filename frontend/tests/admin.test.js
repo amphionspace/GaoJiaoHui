@@ -29,7 +29,7 @@ function stats(overrides = {}) {
 
 async function dashboard(response = stats()) {
   const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(([, id]) => [id, {
-    innerHTML: '', textContent: '', hidden: id === 'alert', listeners: {},
+    innerHTML: '', textContent: '', hidden: false, open: false, listeners: {},
     addEventListener(type, handler) { this.listeners[type] = handler },
   }]))
   const requests = []
@@ -59,7 +59,7 @@ async function dashboard(response = stats()) {
   return fixture
 }
 
-test('admin boots its script and fills the dashboard from API responses', async () => {
+test('admin boots its script and keeps an empty error bar visible', async () => {
   const { elements, requests } = await dashboard()
   assert.deepEqual(requests, ['/api/admin/stats', '/api/admin/sessions?limit=30', '/api/admin/summary'])
   assert.match(elements.get('meta-updated').textContent, /更新于 2026-11-02/)
@@ -68,7 +68,9 @@ test('admin boots its script and fills the dashboard from API responses', async 
   assert.match(elements.get('status').innerHTML, /全部正常/)
   assert.match(elements.get('sessions').innerHTML, /还没有会话记录/)
   assert.match(elements.get('errors').innerHTML, /暂无错误/)
-  assert.equal(elements.get('alert').hidden, true)
+  assert.equal(elements.get('alert').hidden, false)
+  assert.match(elements.get('alert').innerHTML, /暂无接口错误/)
+  assert.doesNotMatch(elements.get('alert').className, /\balert\b/)
 })
 
 test('admin shows recent interface errors and keeps history after refreshing', async () => {
@@ -79,13 +81,36 @@ test('admin shows recent interface errors and keeps history after refreshing', a
   const fixture = await dashboard(data)
   const banner = fixture.elements.get('alert')
   assert.equal(banner.hidden, false)
-  for (const value of [recent.at, recent.path, 'HTTP 503', recent.code]) assert.ok(banner.innerHTML.includes(value))
+  assert.match(banner.className, /\balert\b/)
+  for (const value of [recent.at, recent.path, 'HTTP 503', recent.code, '插画服务额度不足']) assert.ok(banner.innerHTML.includes(value))
   assert.ok(!banner.innerHTML.includes(older.code))
   assert.match(fixture.elements.get('errors').innerHTML, /text_timeout/)
+  banner.open = true
+  await fixture.elements.get('refresh').listeners.click()
+  assert.equal(banner.open, true, 'refresh must preserve expanded error details')
   fixture.response = { ...data, interface_errors: [] }
   await fixture.elements.get('refresh').listeners.click()
-  assert.equal(banner.hidden, true)
+  assert.equal(banner.hidden, false)
+  assert.equal(banner.open, false)
+  assert.match(banner.innerHTML, /暂无接口错误/)
   assert.match(fixture.elements.get('errors').innerHTML, /illustrate_quota/)
+})
+
+test('admin includes current API failures even when request history is empty', async () => {
+  const fixture = await dashboard(stats({ checks: {
+    text: { ok: false, primary_ok: false, balance: -0.02, model: 'deepseek-chat', fallback: 'qwen-plus' },
+    image: { ok: false, detail: '额度不足' },
+    frontend: { ok: false, built: false },
+    disk: { ok: false, percent: 98, free_gb: 1 },
+  } }))
+  const banner = fixture.elements.get('alert')
+  assert.match(banner.innerHTML, /当前 · 文本模型：主模型不可用（余额 -0.02）/)
+  assert.match(banner.innerHTML, /qwen-plus/)
+  assert.match(banner.innerHTML, /插画服务：额度不足/)
+  assert.doesNotMatch(banner.innerHTML, /前端构建|磁盘/)
+  fixture.response = stats({ checks: { text: { ok: true, model: 'deepseek-chat' } } })
+  await fixture.elements.get('refresh').listeners.click()
+  assert.match(banner.innerHTML, /暂无接口错误/)
 })
 
 test('admin escapes interface error text in the banner and history', async () => {
@@ -103,10 +128,11 @@ test('admin shows a fetch failure and the refresh button recovers the data', asy
   const fixture = await dashboard(new Error('network unavailable'))
   const banner = fixture.elements.get('alert')
   assert.equal(banner.hidden, false)
-  assert.match(banner.textContent, /看板数据读取失败：network unavailable/)
+  assert.match(banner.innerHTML, /看板数据读取失败：network unavailable/)
   assert.match(fixture.elements.get('summary').innerHTML, /今日体验/)
   fixture.response = stats()
   await fixture.elements.get('refresh').listeners.click()
-  assert.equal(banner.hidden, true)
+  assert.equal(banner.hidden, false)
+  assert.match(banner.innerHTML, /暂无接口错误/)
   assert.match(fixture.elements.get('requests').innerHTML, /请求总数/)
 })

@@ -652,9 +652,18 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 footer{color:var(--dim);font-size:12px;line-height:1.8}
 button{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:7px;padding:7px 14px;cursor:pointer;font-size:12px}
 button:hover{border-color:var(--acc);color:var(--acc)}
+.error-banner{padding:10px 16px;min-width:0}
+.error-banner summary{display:flex;align-items:baseline;gap:12px;list-style:none;cursor:pointer}
+.error-banner summary::-webkit-details-marker{display:none}
+.error-banner strong{flex:none;font-size:13px}
+.error-preview{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}
+.error-more{flex:none;font-size:12px}
+.error-banner:not(.alert){color:var(--dim)}
+.error-banner:not(.alert) summary{cursor:default}
+.error-banner[open] .error-preview{white-space:normal;overflow-wrap:anywhere}
+.error-banner ul{margin:10px 0 0 18px;padding:0}
+.error-banner li{margin:4px 0;font-size:12.5px;overflow-wrap:anywhere}
 .alert{background:#fbe9e3;border-color:#f0c9bd;color:#8f3b24}
-.alert ul{margin:6px 0 0 18px;padding:0}
-.alert li{margin:2px 0;font-size:12.5px}
 .metric-value{font-size:34px;font-weight:700;color:#1c6bb0;line-height:1.1}
 .metric-value.bad{color:var(--bad)}
 .session-body audio{width:100%;max-width:420px;height:34px}
@@ -688,7 +697,7 @@ details.session summary .s-meta{color:var(--dim);font-size:11px;white-space:nowr
   </div>
 </header>
 <main>
-  <div id="alert" class="card alert" hidden></div>
+  <details id="alert" class="card error-banner" aria-label="接口错误"><summary><strong>接口错误</strong><span class="error-preview" role="status">正在读取接口状态…</span></summary></details>
   <section class="cards" id="summary"></section>
   <section class="cards" id="status"></section>
   <div class="grid3">
@@ -740,17 +749,28 @@ function uptime(seconds) {
   if (hours) return '已运行 ' + hours + ' 小时 ' + minutes + ' 分'
   return '已运行 ' + minutes + ' 分'
 }
-function render(data) {
-  const interfaceErrors = data.interface_errors || []
+const ERROR_REASONS = { illustrate_quota: '插画服务额度不足', text_balance: '文本模型余额不足', text_auth: '文本模型鉴权失败', text_timeout: '文本模型请求超时', text_connection_failed: '文本模型连接失败', text_invalid_result: '文本模型返回内容校验失败', text_upstream_error: '文本模型上游请求失败' }
+function renderErrorBar(messages) {
   const box = $('alert')
-  if (interfaceErrors.length) {
-    box.hidden = false
-    box.innerHTML = '<b>接口错误（最近 15 分钟）</b><ul>' + interfaceErrors.map(item =>
-      '<li>' + esc(item.at || '') + ' · ' + esc(item.path || '') + ' · HTTP ' + esc(String(item.status || '')) +
-      (item.code ? ' · ' + esc(item.code) : '') + '</li>').join('') + '</ul>'
-  } else {
-    box.hidden = true
-  }
+  box.className = 'card error-banner' + (messages.length ? ' alert' : '')
+  if (!messages.length) box.open = false
+  box.innerHTML = '<summary><strong>接口错误</strong><span class="error-preview" role="status">' +
+    esc(messages[0] || '暂无接口错误') + '</span>' +
+    (messages.length ? '<span class="error-more">详情（' + messages.length + '）</span>' : '') + '</summary>' +
+    (messages.length ? '<ul>' + messages.map(message => '<li>' + esc(message) + '</li>').join('') + '</ul>' : '')
+}
+function render(data) {
+  const currentErrors = ['text', 'asr', 'tts', 'image'].flatMap(name => {
+    const check = (data.checks || {})[name]
+    if (!check || check.ok !== false) return []
+    const reason = check.detail || detail(name, check) || '接口检查失败'
+    return ['当前 · ' + CHECK_LABELS[name] + '：' + reason]
+  })
+  const interfaceErrors = (data.interface_errors || []).map(item => {
+    const code = item.code || ''
+    return [item.at || '', item.path || '', item.status ? 'HTTP ' + item.status : '', ERROR_REASONS[code] || '', code].filter(Boolean).join(' · ')
+  })
+  renderErrorBar([...currentErrors, ...interfaceErrors])
   $('meta-release').textContent = data.release || ''
   $('meta-version').textContent = 'v' + (data.version || '')
   $('meta-uptime').textContent = uptime(data.uptime_seconds)
@@ -855,9 +875,7 @@ async function refresh() {
     if (!response.ok) throw new Error('HTTP ' + response.status)
     render(await response.json())
   } catch (error) {
-    const box = $('alert')
-    box.hidden = false
-    box.textContent = '看板数据读取失败：' + error.message + '。若刚修改过后台密码，请关闭浏览器后重新登录。'
+    renderErrorBar(['看板数据读取失败：' + error.message + '。若刚修改过后台密码，请重新登录。'])
   }
 }
 $('refresh').addEventListener('click', refresh)
