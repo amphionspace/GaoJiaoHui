@@ -230,8 +230,9 @@ def image_check():
     recent = [item for item in metrics_store.recent_errors(900)
               if str(item.get('path', '')).startswith('/api/journey/illustrate')]
     codes = [str(item.get('code', '')) for item in recent]
-    detail = '额度不足' if 'illustrate_quota' in codes else (codes[0] if codes else '')
-    return {'ok': not recent, 'recent_failures': len(recent), 'detail': detail}
+    last = metrics_store.last_status('/api/journey/illustrate')
+    detail = '额度不足' if 'illustrate_quota' in codes else ('' if last < 400 else 'HTTP ' + str(last))
+    return {'ok': last < 400, 'recent_failures': len(recent), 'detail': detail, 'last_status': last}
 
 
 async def asr_check():

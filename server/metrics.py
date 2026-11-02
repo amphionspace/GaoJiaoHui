@@ -49,6 +49,7 @@ class Metrics:
         entry = self.paths[path] = {
             'count': 0, 'errors': 0, 'statuses': Counter(),
             'durations': deque(maxlen=DURATION_WINDOW), 'seconds': 0.0,
+            'last_status': 0, 'last_at': 0.0,
         }
         return entry
 
@@ -60,6 +61,8 @@ class Metrics:
             entry['seconds'] += seconds
             entry['durations'].append(seconds)
             entry['statuses'][str(status)] += 1
+            entry['last_status'] = status
+            entry['last_at'] = now
             if status >= 500:
                 entry['errors'] += 1
             self.recent.append((now, status))
@@ -88,6 +91,11 @@ class Metrics:
         total = len(self.recent)
         errors = sum(1 for _, status in self.recent if status >= 500)
         return {'window_seconds': RECENT_WINDOW, 'total': total, 'errors': errors}
+
+    def last_status(self, path):
+        with self.lock:
+            entry = self.paths.get(path) or {}
+            return int(entry.get('last_status', 0))
 
     def recent_errors(self, seconds=900):
         cutoff = time.time() - seconds

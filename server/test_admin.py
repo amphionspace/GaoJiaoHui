@@ -86,6 +86,7 @@ class AdminTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Max-Age=0', response.headers['set-cookie'])
 
     async def test_recent_business_failures_raise_an_admin_alert(self):
+        main.metrics_store.request('/api/journey/illustrate', 503, 0.1)
         main.metrics_store.error('/api/journey/illustrate', 503, 'illustrate_quota')
         with patch.dict('os.environ', ADMIN_ENV):
             async with client() as api:
