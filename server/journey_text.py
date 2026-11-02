@@ -285,17 +285,33 @@ def compose_configuration(request):
     return config
 
 
-async def compose_notes(request, config=None, session_id=None):
-    """Yield ("draft"|"final", note, config, session_id) as each usable result arrives.
+PROVIDER_FAILURES = {"text_upstream_error", "text_balance", "text_auth"}
 
-    The draft is emitted before the editorial pass so the browser can show text
-    while the review is still running; a retry after a rejected review emits a
-    fresh draft. Both HTTP endpoints share this generator so the two-pass rules
-    and their retry behaviour stay in one place.
-    """
-    config = config or compose_configuration(request)
-    started = time.monotonic()
-    session_id = session_id or session_id_for(request)
+
+def fallback_configuration():
+    """Optional second text provider (defaults to Bailian's qwen-flash)."""
+    url = os.environ.get("JOURNEY_LLM_FALLBACK_URL", "").strip()
+    model = os.environ.get("JOURNEY_LLM_FALLBACK_MODEL", "").strip()
+    key = os.environ.get("JOURNEY_LLM_FALLBACK_API_KEY", "").strip()
+    if url and model:
+        return {"url": url, "model": model, "api_key": key}
+    try:
+        try:
+            from . import bailian_tts
+        except ImportError:
+            import bailian_tts
+        config = bailian_tts.configuration()
+    except Exception:
+        return None
+    base = str(config.get("compatible_base_url", "")).rstrip("/")
+    key = str(config.get("api_key", "")).strip()
+    if not base or not key:
+        return None
+    return {"url": base + "/chat/completions", "model": model or "qwen-flash", "api_key": key}
+
+
+async def _compose_with(config, request, session_id, started, deadline):
+    """One provider's generation + review; yields ("draft"|"final", note)."""
     headers = {"Authorization": "Bearer " + config["api_key"]} if config["api_key"] else {}
     english = request.language == "en"
     messages = [
@@ -305,7 +321,6 @@ async def compose_notes(request, config=None, session_id=None):
             {"主题": TOPICS[request.topic], "完整讲述": request.transcript}, ensure_ascii=False)},
     ]
     local_model = httpx.URL(config["url"]).host in ("127.0.0.1", "localhost", "::1")
-    deadline = time.monotonic() + 82
     async with httpx.AsyncClient(timeout=40, trust_env=not local_model) as client:
         async def post(payload):
             # The provider answers 503 "service is too busy" intermittently; one
@@ -324,8 +339,13 @@ async def compose_notes(request, config=None, session_id=None):
             })
             if response.status_code >= 400:
                 status = response.status_code
-                message = "文本服务鉴权失败，请工作人员检查配置。" if status in (401, 403) else "文本服务暂时无法生成回信，请稍后重试。"
-                raise HTTPException(502, detail={"code": "text_upstream_error", "message": message, "upstream_status": status})
+                if status == 402:
+                    code, message = "text_balance", "文本服务额度不足，请联系工作人员充值后再试。"
+                elif status in (401, 403):
+                    code, message = "text_auth", "文本服务鉴权失败，请工作人员检查配置。"
+                else:
+                    code, message = "text_upstream_error", "文本服务暂时无法生成回信，请稍后重试。"
+                raise HTTPException(502, detail={"code": code, "message": message, "upstream_status": status})
             try:
                 content = response.json()["choices"][0]["message"]["content"]
                 note = parse_note(content, request.transcript, request.language)
@@ -333,7 +353,7 @@ async def compose_notes(request, config=None, session_id=None):
                 sessions.record_draft(session_id, request, note, draft_ms, config["model"])
                 metrics.event("compose_draft")
                 metrics.observe("compose_draft_seconds", time.monotonic() - started)
-                yield "draft", note, config, session_id
+                yield "draft", note
                 # A separate editorial pass checks meaning, which length/anchor checks cannot establish.
                 reviewed = await post({
                     "model": config["model"], "temperature": 0.2, "max_tokens": MAX_COMPLETION_TOKENS,
@@ -348,12 +368,47 @@ async def compose_notes(request, config=None, session_id=None):
                 sessions.record_final(session_id, reviewed_note, round((time.monotonic() - started) * 1000))
                 metrics.event("compose_final")
                 metrics.observe("compose_final_seconds", time.monotonic() - started)
-                yield "final", reviewed_note, config, session_id
+                yield "final", reviewed_note
                 return
             except (KeyError, IndexError, TypeError, AttributeError, ValueError, ValidationError) as error:
                 if not attempt:
                     messages.append({"role": "user", "content": retry_prompt(error, english)})
     raise HTTPException(502, detail={"code": "text_invalid_result", "message": "这次回信未通过内容检查，完整讲述已保留，请重新整理。"})
+
+
+async def compose_notes(request, config=None, session_id=None):
+    """Yield ("draft"|"final", note, config, session_id), failing over once.
+
+    The primary provider is the configured text model; if it is out of balance,
+    rejects the key or is overloaded before any draft, the fallback provider is
+    tried. A review failure after a draft does not restart the other provider.
+    """
+    primary = config or compose_configuration(request)
+    session_id = session_id or session_id_for(request)
+    started = time.monotonic()
+    deadline = started + 82
+    candidates = [primary]
+    fallback = fallback_configuration()
+    if fallback and (fallback["url"], fallback["model"]) != (primary["url"], primary["model"]):
+        candidates.append(fallback)
+    for index, candidate in enumerate(candidates):
+        produced = False
+        try:
+            async for kind, note in _compose_with(candidate, request, session_id, started, deadline):
+                produced = True
+                yield kind, note, candidate, session_id
+            return
+        except HTTPException as error:
+            code = error.detail.get("code", "") if isinstance(error.detail, dict) else ""
+            if index == len(candidates) - 1 or produced or code not in PROVIDER_FAILURES:
+                raise
+            metrics.event("text_failover")
+            print("text provider failed, trying fallback:", code)
+        except (httpx.TimeoutException, asyncio.TimeoutError, httpx.RequestError) as error:
+            if index == len(candidates) - 1 or produced:
+                raise
+            metrics.event("text_failover")
+            print("text provider failed, trying fallback:", type(error).__name__)
 
 
 @router.post("/compose", dependencies=[Depends(compose_access)])
@@ -398,21 +453,23 @@ async def compose_stream(request: ComposeRequest):
 
     async def events():
         draft = None
+        current_config = config
         try:
-            async for kind, note, _, _ in compose_notes(request, config, session_id):
+            async for kind, note, current, _ in compose_notes(request, config, session_id):
+                current_config = current
                 if kind == "draft":
                     draft = note
                     yield stream_line({"stage": "draft", "reviewed": False, "session_id": session_id,
-                                       **public_note(note, config, session_id)})
+                                       **public_note(note, current, session_id)})
                 else:
                     yield stream_line({"stage": "final", "reviewed": True, "session_id": session_id,
-                                       **public_note(note, config, session_id)})
+                                       **public_note(note, current, session_id)})
         except HTTPException as error:
             detail = error.detail
             if draft is not None and isinstance(detail, dict) and detail.get("code") == "text_review_failed":
                 metrics.event("compose_review_fallback")
                 yield stream_line({"stage": "final", "reviewed": False, "session_id": session_id,
-                                   "warning": "这次只完成了一轮整理，文字已保留。", **public_note(draft, config, session_id)})
+                                   "warning": "这次只完成了一轮整理，文字已保留。", **public_note(draft, current_config, session_id)})
             else:
                 code = detail.get("code", "") if isinstance(detail, dict) else ""
                 metrics.event("compose_error")
@@ -423,7 +480,7 @@ async def compose_stream(request: ComposeRequest):
             if draft is not None:
                 metrics.event("compose_review_fallback")
                 yield stream_line({"stage": "final", "reviewed": False, "session_id": session_id,
-                                   "warning": "复核超时，已保留当前文字。", **public_note(draft, config, session_id)})
+                                   "warning": "复核超时，已保留当前文字。", **public_note(draft, current_config, session_id)})
             else:
                 metrics.event("compose_error")
                 metrics.error("/api/journey/compose/stream", 504, "text_timeout")
@@ -433,7 +490,7 @@ async def compose_stream(request: ComposeRequest):
             if draft is not None:
                 metrics.event("compose_review_fallback")
                 yield stream_line({"stage": "final", "reviewed": False, "session_id": session_id,
-                                   "warning": "复核暂时中断，已保留当前文字。", **public_note(draft, config, session_id)})
+                                   "warning": "复核暂时中断，已保留当前文字。", **public_note(draft, current_config, session_id)})
             else:
                 metrics.event("compose_error")
                 metrics.error("/api/journey/compose/stream", 502, "text_connection_failed")

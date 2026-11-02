@@ -44,6 +44,7 @@ from pydantic import BaseModel, Field
 try:
     from .journey_text import router as journey_text_router
     from .journey_text import configuration as text_configuration
+    from .journey_text import fallback_configuration as text_fallback_configuration
     from .journey_text import strip_disclaimers
     from .journey_image import router as journey_image_router
     from .security import RequestLimits, compose_access
@@ -52,6 +53,7 @@ try:
 except ImportError:
     from journey_text import router as journey_text_router
     from journey_text import configuration as text_configuration
+    from journey_text import fallback_configuration as text_fallback_configuration
     from journey_text import strip_disclaimers
     from journey_image import router as journey_image_router
     from security import RequestLimits, compose_access
@@ -202,10 +204,12 @@ def frontend_check():
 def text_check():
     try:
         config = text_configuration()
+        fallback = text_fallback_configuration()
         configured = bool(config.get('url') and config.get('model'))
-        return {'ok': configured, 'model': config.get('model') or ''}
+        return {'ok': configured or bool(fallback), 'model': config.get('model') or '',
+                'fallback': (fallback or {}).get('model', '')}
     except Exception:  # HTTPException from an unreadable config file.
-        return {'ok': False, 'model': ''}
+        return {'ok': False, 'model': '', 'fallback': ''}
 
 
 def asr_check():
@@ -640,10 +644,10 @@ const dot = ok => '<span class="dot ' + (ok ? 'ok' : 'bad') + '"></span>'
 const CHECK_LABELS = { frontend: '前端构建', text: '文本模型', asr: '语音识别', tts: '声音合成', disk: '磁盘' }
 const TOPIC_LABELS = { future: '未来', product: '产品', idea: '想法', story: '故事' }
 let openSessions = new Set()
-const EVENT_LABELS = { compose_draft: '草稿上屏', compose_final: '审校完成', compose_review_fallback: '审校回退', compose_error: '整理失败', asr_session: '语音会话', illustrate: '插画请求', illustrate_error: '插画失败', tts_amphion_ok: '自建TTS成功', tts_amphion_fail: '自建TTS失败', tts_no_sample: '无参考音', tts_failover: '降级百炼', tts_bailian_ok: '百炼成功', tts_bailian_fail: '百炼失败' }
+const EVENT_LABELS = { compose_draft: '草稿上屏', compose_final: '审校完成', compose_review_fallback: '审校回退', compose_error: '整理失败', asr_session: '语音会话', illustrate: '插画请求', illustrate_error: '插画失败', tts_amphion_ok: '自建TTS成功', tts_amphion_fail: '自建TTS失败', tts_no_sample: '无参考音', tts_failover: '降级百炼', text_failover: '文本降级', tts_bailian_ok: '百炼成功', tts_bailian_fail: '百炼失败' }
 const LATENCY_LABELS = { compose_draft_seconds: '草稿时延', compose_final_seconds: '终版时延' }
 function detail(name, check) {
-  if (name === 'text') return check.model || ''
+  if (name === 'text') return (check.model || '') + (check.fallback ? ' → ' + check.fallback : '')
   if (name === 'tts') {
     const parts = [check.provider || '']
     if (check.amphion_ready) parts.push('自建就绪')
