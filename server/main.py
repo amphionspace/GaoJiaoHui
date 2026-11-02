@@ -741,11 +741,11 @@ function uptime(seconds) {
   return '已运行 ' + minutes + ' 分'
 }
 function render(data) {
-  const errors = data.interface_errors || []
+  const interfaceErrors = data.interface_errors || []
   const box = $('alert')
-  if (errors.length) {
+  if (interfaceErrors.length) {
     box.hidden = false
-    box.innerHTML = '<b>接口错误（最近 15 分钟）</b><ul>' + errors.map(item =>
+    box.innerHTML = '<b>接口错误（最近 15 分钟）</b><ul>' + interfaceErrors.map(item =>
       '<li>' + esc(item.at || '') + ' · ' + esc(item.path || '') + ' · HTTP ' + esc(String(item.status || '')) +
       (item.code ? ' · ' + esc(item.code) : '') + '</li>').join('') + '</ul>'
   } else {
