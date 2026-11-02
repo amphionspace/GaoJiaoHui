@@ -544,7 +544,7 @@ export class JourneyVoice {
     try { blob = await this.request('/tts/v1/audio/speech', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(240000)]),
-      body: JSON.stringify({ voice: this.name, input: text, response_format: 'wav', sample_rate: 24000 }),
+      body: JSON.stringify({ voice: this.name, input: text, response_format: 'wav', sample_rate: 24000, language: store.locale === 'en' ? 'English' : 'Chinese' }),
     })
     } catch (error) {
       if (error.status === 404 || error.status === 410) this.ready = false

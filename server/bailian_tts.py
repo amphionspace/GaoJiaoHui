@@ -225,12 +225,23 @@ def _wav_from_pcm(raw: bytes) -> bytes:
     return output.getvalue()
 
 
-async def synthesize(request: Request):
+async def check_voice(request: Request, voice: str):
+    """Validate the client and that this voice belongs to it; returns the key."""
     key = await require_client_key(request)
-    try:
-        body = await request.json()
-    except ValueError:
-        raise HTTPException(400, "合成请求不是有效 JSON。") from None
+    if not JOURNEY_VOICE.fullmatch(voice or ""):
+        raise HTTPException(400, "请提供有效的本人音色。")
+    if not _registered(key, voice):
+        raise HTTPException(404, "本次音色已失效，请重新生成本人声音。")
+    return key
+
+
+async def synthesize(request: Request, body=None, key=None):
+    key = key or await require_client_key(request)
+    if body is None:
+        try:
+            body = await request.json()
+        except ValueError:
+            raise HTTPException(400, "合成请求不是有效 JSON。") from None
     if not isinstance(body, dict):
         raise HTTPException(400, "合成请求不是有效 JSON 对象。")
     voice = str(body.get("voice", "")).strip()

@@ -433,6 +433,7 @@ test('journey registration and synthesis use the dedicated service and the same 
     input: '未来的我，请继续保持好奇。',
     response_format: 'wav',
     sample_rate: 24000,
+    language: 'Chinese',
   })
 })
 

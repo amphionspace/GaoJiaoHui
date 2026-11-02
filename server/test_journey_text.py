@@ -398,3 +398,21 @@ class EvaluationChecksTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DisclaimerTests(unittest.TestCase):
+    def test_disclaimers_are_stripped_from_the_note_and_reply(self):
+        payload = {**NOTE,
+                   'note_text': '这是 AI 合成语音情景演示，以下是虚构台词。' + NOTE['summary'],
+                   'message': '（AI 合成语音）' + NOTE['message']}
+        note = journey_text.parse_note(json.dumps(payload, ensure_ascii=False), RAW)
+        self.assertEqual(note.note_text, NOTE['summary'])
+        self.assertEqual(note.message, NOTE['message'])
+
+    def test_a_note_that_is_only_a_disclaimer_is_rejected(self):
+        payload = {**NOTE, 'note_text': '这是 AI 合成语音情景演示，以下是虚构台词。'}
+        with self.assertRaises(Exception):
+            journey_text.parse_note(json.dumps(payload, ensure_ascii=False), RAW)
+
+    def test_disclaimer_pattern_covers_english(self):
+        self.assertEqual(journey_text.strip_disclaimers('This is an AI-generated voice demonstration. Hello there.'), 'Hello there.')

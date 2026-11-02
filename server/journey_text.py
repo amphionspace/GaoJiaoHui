@@ -30,6 +30,14 @@ MAX_REPLY_CHARS = 50
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 TOPICS = {"future": "和2036对话：十年后对科技、生活的想象和期待，那时希望自己在做什么", "product": "最惊喜的产品", "idea": "一个新想法", "story": "今天的故事"}
 TOPICS_EN = {"future": "A conversation with 2036: what technology, life, and your own work may become in ten years", "product": "The technology or product that surprised you most", "idea": "A new idea", "story": "A story from today"}
+DISCLAIMER = re.compile(
+    r'(?:ai\s*合成|ai\s*生成|人工智能生成|合成语音|情景演示|虚构台词|仅供演示|演示音频|语音演示|'
+    r'本(?:故事|内容|情节)[^。！？!?]{0,8}(?:虚构|演绎)|以下[^。！？!?]{0,10}虚构|'
+    r'非真实(?:录音|声音)|虚构内容|免责声明|'
+    r'ai-generated|ai synthesized|synthetic voice|fictional|simulat(?:ed|ion)|'
+    r'disclaimer|for demonstration)',
+    re.IGNORECASE,
+)
 DISALLOWED_MESSAGE_PHRASES = (
     "你一定可以", "未来可期", "一切都是最好的安排", "勇敢追梦", "每一步都算数",
     "不必一次定死", "不用一次定死", "低门槛", "方向具体", "方向很具体", "方向已经很具体",
@@ -46,6 +54,7 @@ note_text：最后便签中“给未来的信”正文。你是一位擅长保�
 文字自然、具体、简洁，有轻微文字美感，像用户把自己的想法重新说清楚了一遍。尽量沿用原文有特点的词语，保留幽默、好奇、认真或犹豫，不把所有人的表达改成同一种腔调。可以让语序和节奏更流畅，但不要强行煽情、写成诗句或拔高主题。避免“科技改变生活”“未来充满无限可能”“让世界更加美好”等泛泛表达；不要添加原文没有的孤独、治愈、勇气、陪伴等情绪或意义。
 正文优先收敛为两句完整、连贯的话，通常40至70字，最多80字；原话很短时可以少于40字，不为凑字数扩写，必要时才使用1句或3句。便签顶部已有固定标题“给未来的信”，只输出正文，不生成标题、称呼、落款或日期；不输出“便签正文”等标签，不加引号，不列要点，不输出解释、分析或多个版本。
 输出前检查：每个具体信息、情绪和理由都能在原话中找到依据；关键条件、否定和不确定性仍然保留；原文有具体细节时至少保留一个属于这位用户的细节。只输出检查完成后的最终正文。
+不要在便签正文或回信里写“AI 合成、情景演示、虚构台词、仅供演示、免责声明”等说明性话术；只写角色本身要说的话，不要解释这是演示或虚构。
 
 note_text示例：原话“我看到机器人，一开始觉得新奇，后来想到爸爸搬东西很吃力。我想弄清它能不能帮上忙。”
 应写成“我看到机器人时，先想到的是爸爸搬东西很吃力。我想弄清它到底能不能帮上忙。”
@@ -97,7 +106,7 @@ message允许从原文理解出牵挂和愿望：想帮妈妈搬东西，可以�
 不凭指出产品错误就夸认真，不用“难得、敏锐、你的努力我看见了”等点评；实际反馈回应用户在意的标准。拒绝励志就不劝；只想倾诉就不布置任务。
 用户没有问怎么办，就不要增加“先看看、再问问、慢慢弄清楚”等行动建议，更不能用这些建议替换原有的关怀。
 message硬上限50个字符，含标点、字母和数字，通常25至45字、1至3句。超长重写完整短句，不能截断或用省略号结尾。删除问好、自报身份、无关解释和“听你说”的铺垫。
-去掉呃、嗯和“不必一次定死”等禁语，保留自然口语。试音不补故事或技术状态。
+去掉呃、嗯和“不必一次定死”等禁语，保留自然口语。试音不补故事或技术状态。删除任何“AI 合成、情景演示、虚构台词、仅供演示、免责声明”等说明性话术。
 takeaway原样选自message一句完整话，12至50字，优先保留具体牵挂、愿望或标准；没有合适句子则为空。sketch_prompt必须是具体可见的单幅画面，不写风格或抽象情绪。其余字段限制不变。"""
 
 SYSTEM_PROMPT_EN = """You shape a small future note and write a private phone call from the user's future self.
@@ -113,6 +122,7 @@ Prefer two complete, connected sentences, usually 40–70 characters and at most
 note_text example: transcript “I saw a robot. At first it was just exciting, but then I thought about how hard it is for my father to carry things. I want to know whether it can really help.”
 Write: “When I saw the robot, I thought first of how hard it is for my father to carry things. I want to know whether it can really help.”
 
+Never add disclaimers or meta commentary such as “AI-generated”, “synthetic voice”, “fictional dialogue”, “for demonstration”, or “this is a simulation”; write only the character's own words.
 message: imagine a private call from 2036 to today. Use “I” for the caller and “you” for today's speaker. The first sentence must immediately name the specific person, detail, standard, or wish that matters here. Speak like someone close who understood the point, not like a reviewer, therapist, or customer-support bot. Add one grounded sentence of warmth or courage only when the transcript supports it. Do not repeat the summary, lead with hello, identify yourself, say “I heard you”, praise personality, diagnose feelings, promise technology will work, or add an action plan unless asked. Keep it natural and speakable, usually 25–45 characters, never over 50 characters including punctuation. Write complete sentences; never truncate with an ellipsis.
 
 takeaway: copy one complete sentence from message, 12–50 characters, preferably the sentence that holds the specific care or wish. Return an empty string if no sentence qualifies.
@@ -201,11 +211,28 @@ def has_one_to_three_complete_sentences(value, language="zh"):
     return bool(re.search(ending, value)) and 1 <= count <= 3
 
 
+def strip_disclaimers(text):
+    """Remove disclaimers/meta lines a model may wrap around a character line."""
+    if not text:
+        return ''
+    value = str(text)
+    value = re.sub(r'[（(【\[][^（）()【】\[\]]{0,60}?' + DISCLAIMER.pattern +
+                   r'[^（）()【】\[\]]{0,60}[）)】\]]', '', value, flags=re.IGNORECASE)
+    value = re.sub(r'[^。！？!?.\n]*(?:' + DISCLAIMER.pattern + r')[^。！？!?.\n]*[。！？!?.]?',
+                   '', value, flags=re.IGNORECASE)
+    return re.sub(r'\s{2,}', ' ', value).strip()
+
+
 def parse_note(content, transcript, language="zh"):
     content = content.strip()
     if content.startswith("```"):
         content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content)
-    note = ComposedNote.model_validate(normalize_note_payload(json.loads(content)))
+    payload = normalize_note_payload(json.loads(content))
+    if isinstance(payload, dict):
+        for key in ("note_text", "summary", "message", "takeaway"):
+            if isinstance(payload.get(key), str):
+                payload[key] = strip_disclaimers(payload[key])
+    note = ComposedNote.model_validate(payload)
     note.note_text = note.note_text.strip()
     note.message = note.message.strip()
     if not note.note_text or not note.message:

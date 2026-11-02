@@ -19,3 +19,30 @@
 判断顺序：是否像本人、普通话是否自然、情绪是否克制、首句等待多久、长句是否漏字、是否能删除临时音色。不要只比较固定播音员试听。
 
 2026-10-20 已用合成测试录音完成真实“上传样本→创建临时音色→合成→删除”验证，并在浏览器中验证自动播放。修复了上传依赖、音色名称长度和本地编号与百炼编号的映射问题。测试音色已清理，百炼密钥仅放服务端；仍需本人录音确认音色相似度。详细记录见 `docs/validation/journey-2026-10-20.md`。
+
+## 自建 TTS 优先 + 百炼兜底（2026-11-02）
+
+合成链路改为两级：
+
+1. 访客录音样本在音色注册时由服务端留一份 5–30 秒参考音（`.journey-state/tts/`，默认 2 小时、最多 40 条，音色删除时一起删除）。
+2. 合成先调自建 TTS：`https://test-playground.amphion.top/tts-api/v1/audio/speech`，用 `ref_audio` + `x_vector_only_mode` 复刻访客音色，`language` 跟随页面中英文。
+3. 自建超时、非 200 或返回不是 WAV 时，自动降级到百炼已注册的 `voice`。
+4. 自建失败后进入 30 秒冷却，避免每个请求都先等一次超时；冷却期内直接走百炼。
+
+配置：
+
+```ini
+JOURNEY_TTS_ORDER=amphion,bailian     # 只写 bailian 可关闭“自建优先”
+AMPHION_TTS_URL=https://test-playground.amphion.top
+AMPHION_TTS_TIMEOUT=45                # 自建单次合成超时
+AMPHION_TTS_COOLDOWN=30               # 自建失败后的冷却秒数
+JOURNEY_TTS_SAMPLE_TTL=7200           # 参考音缓存秒数
+JOURNEY_TTS_SAMPLE_MAX=40             # 参考音缓存条数
+```
+
+排障：
+
+- `/admin` 的“旅程阶段”新增 `自建TTS成功`、`自建TTS失败`、`无参考音`、`降级百炼`、`百炼成功`、`百炼失败`。
+- `/api/health` 的 `checks.tts` 返回 `provider`（如 `amphion → bailian`）、`amphion_ready`、`amphion_ms`、`cooldown`；`/tts-api/ready` 的结果缓存 20 秒。
+- 服务日志会打印 `amphion tts failed: <类型或状态码>`，不包含朗读文本。
+- 文本侧同时清理“AI 合成 / 情景演示 / 虚构台词 / 仅供演示”等说明性话术，避免被 TTS 读出来。

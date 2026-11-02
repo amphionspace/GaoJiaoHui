@@ -44,17 +44,19 @@ from pydantic import BaseModel, Field
 try:
     from .journey_text import router as journey_text_router
     from .journey_text import configuration as text_configuration
+    from .journey_text import strip_disclaimers
     from .journey_image import router as journey_image_router
     from .security import RequestLimits, compose_access
     from .metrics import metrics as metrics_store
-    from . import bailian_tts, managed_asr, sessions
+    from . import amphion_tts, bailian_tts, managed_asr, sessions, voice_samples
 except ImportError:
     from journey_text import router as journey_text_router
     from journey_text import configuration as text_configuration
+    from journey_text import strip_disclaimers
     from journey_image import router as journey_image_router
     from security import RequestLimits, compose_access
     from metrics import metrics as metrics_store
-    import bailian_tts, managed_asr, sessions
+    import amphion_tts, bailian_tts, managed_asr, sessions, voice_samples
 
 UPSTREAM = os.environ.get('GATEWAY_URL', 'https://amphion.top').rstrip('/')
 UPSTREAM_HOST = urlsplit(UPSTREAM).hostname
@@ -217,15 +219,20 @@ def asr_check():
         return {'ok': False, 'managed': True}
 
 
-def tts_check():
+async def tts_check():
     provider = os.environ.get('JOURNEY_TTS_PROVIDER', 'legacy').strip().lower() or 'legacy'
-    if not bailian_tts.enabled():
-        return {'ok': True, 'provider': provider, 'detail': 'gateway'}
-    try:
-        bailian_tts.configuration()
-        return {'ok': True, 'provider': provider}
-    except Exception:
-        return {'ok': False, 'provider': provider}
+    bailian_ok = True
+    if bailian_tts.enabled():
+        try:
+            bailian_tts.configuration()
+        except Exception:
+            bailian_ok = False
+    primary = await amphion_tts.ready()
+    return {
+        'ok': bailian_ok or primary['ok'], 'provider': ' → '.join(amphion_tts.order()),
+        'bailian': bailian_ok, 'amphion_ready': primary['ok'],
+        'amphion_ms': primary['latency_ms'], 'cooldown': amphion_tts.cooldown_remaining(),
+    }
 
 
 def disk_check():
@@ -234,12 +241,12 @@ def disk_check():
     return {'ok': percent < 95, 'percent': round(percent, 1), 'free_gb': round(usage.free / 1e9, 1)}
 
 
-def health_checks():
+async def health_checks():
     return {
         'frontend': frontend_check(),
         'text': text_check(),
         'asr': asr_check(),
-        'tts': tts_check(),
+        'tts': await tts_check(),
         'disk': disk_check(),
     }
 
@@ -352,6 +359,38 @@ async def proxy(path: str, request: Request):
                     media_type=r.headers.get("Content-Type", "application/octet-stream"))
 
 
+async def synthesize_journey_speech(request, body):
+    """Primary Amphion TTS, then the Qwen/Bailian voice as a fallback."""
+    voice = str(body.get("voice", "")).strip()
+    text = strip_disclaimers(str(body.get("input", "")).strip())
+    if not voice or not text or len(text) > 600:
+        raise HTTPException(400, "请提供有效的本人音色和朗读文字。")
+    key = await bailian_tts.check_voice(request, voice)
+    body["input"] = text
+    if amphion_tts.enabled() and not amphion_tts.cooling_down():
+        sample = voice_samples.load(voice)
+        if sample:
+            try:
+                audio = await amphion_tts.synthesize(text, sample, body.get("language", "Chinese"))
+                metrics_store.event("tts_amphion_ok")
+                return audio
+            except amphion_tts.AmphionError as error:
+                metrics_store.event("tts_amphion_fail")
+                print("amphion tts failed:", str(error)[:80])
+        else:
+            metrics_store.event("tts_no_sample")
+    if "bailian" not in amphion_tts.order():
+        raise HTTPException(502, "自建语音合成暂时不可用，请稍后重试。")
+    metrics_store.event("tts_failover")
+    try:
+        audio = await bailian_tts.synthesize(request, body, key=key)
+    except HTTPException:
+        metrics_store.event("tts_bailian_fail")
+        raise
+    metrics_store.event("tts_bailian_ok")
+    return audio
+
+
 @app.api_route("/api/journey/tts/{path:path}", methods=["GET", "POST", "DELETE"])
 async def journey_tts(path: str, request: Request):
     if bailian_tts.enabled():
@@ -364,18 +403,29 @@ async def journey_tts(path: str, request: Request):
             if not isinstance(voice_name, str) or not isinstance(audio_file, UploadFile):
                 raise HTTPException(400, "请提供音色编号和本人录音。")
             session_id = request.headers.get("x-journey-session", "")
-            if session_id:
-                sample = await audio_file.read(2 * 1024 * 1024 + 1)
-                await audio_file.seek(0)
-                if 0 < len(sample) <= 2 * 1024 * 1024:
+            sample = await audio_file.read(2 * 1024 * 1024 + 1)
+            await audio_file.seek(0)
+            result = await bailian_tts.create_voice(request, voice_name, audio_file)
+            if 0 < len(sample) <= 2 * 1024 * 1024:
+                voice_samples.save(voice_name, sample)
+                if session_id:
                     sessions.save_audio(session_id, "sample", sample)
-            return await bailian_tts.create_voice(request, voice_name, audio_file)
+            return result
         if request.method == "POST" and path == "v1/audio/speech":
-            audio = await bailian_tts.synthesize(request)
+            try:
+                body = await request.json()
+            except ValueError:
+                raise HTTPException(400, "合成请求不是有效 JSON。")
+            if not isinstance(body, dict):
+                raise HTTPException(400, "合成请求不是有效 JSON 对象。")
+            audio = await synthesize_journey_speech(request, body)
             sessions.save_audio(request.headers.get("x-journey-session", ""), "reply", audio)
             return Response(content=audio, media_type="audio/wav")
         if request.method == "DELETE" and path.startswith("v1/audio/voices/"):
-            return await bailian_tts.delete_voice(request, path.rsplit("/", 1)[-1])
+            name = path.rsplit("/", 1)[-1]
+            result = await bailian_tts.delete_voice(request, name)
+            voice_samples.delete(name)
+            return result
         return JSONResponse({"detail": "Unknown journey voice endpoint"}, status_code=404)
     allowed = {
         ("GET", "v1/audio/voices"), ("POST", "v1/audio/voices"),
@@ -443,7 +493,7 @@ async def admin_session_audio(session_id: str, kind: str):
 
 @app.get('/api/health')
 async def health():
-    checks = health_checks()
+    checks = await health_checks()
     snapshot = metrics_store.snapshot()
     return {
         'status': health_status(checks), 'scope': 'application', 'version': VERSION,
@@ -459,7 +509,7 @@ async def health():
 
 @app.get('/api/admin/stats', dependencies=[Depends(require_admin)])
 async def admin_stats():
-    checks = health_checks()
+    checks = await health_checks()
     snapshot = metrics_store.snapshot()
     return {
         'release': os.path.basename(ROOT), 'version': VERSION, 'status': health_status(checks),
@@ -488,7 +538,7 @@ async def admin_sessions_clear():
 
 @app.get('/metrics', dependencies=[Depends(require_admin)])
 async def prometheus_metrics():
-    checks = health_checks()
+    checks = await health_checks()
     body = metrics_store.prometheus()
     for name, check in checks.items():
         body += f'journey_health_ok{{check="{name}"}} {1 if check["ok"] else 0}\n'
@@ -590,11 +640,17 @@ const dot = ok => '<span class="dot ' + (ok ? 'ok' : 'bad') + '"></span>'
 const CHECK_LABELS = { frontend: '前端构建', text: '文本模型', asr: '语音识别', tts: '声音合成', disk: '磁盘' }
 const TOPIC_LABELS = { future: '未来', product: '产品', idea: '想法', story: '故事' }
 let openSessions = new Set()
-const EVENT_LABELS = { compose_draft: '草稿上屏', compose_final: '审校完成', compose_review_fallback: '审校回退', compose_error: '整理失败', asr_session: '语音会话', illustrate: '插画请求', illustrate_error: '插画失败' }
+const EVENT_LABELS = { compose_draft: '草稿上屏', compose_final: '审校完成', compose_review_fallback: '审校回退', compose_error: '整理失败', asr_session: '语音会话', illustrate: '插画请求', illustrate_error: '插画失败', tts_amphion_ok: '自建TTS成功', tts_amphion_fail: '自建TTS失败', tts_no_sample: '无参考音', tts_failover: '降级百炼', tts_bailian_ok: '百炼成功', tts_bailian_fail: '百炼失败' }
 const LATENCY_LABELS = { compose_draft_seconds: '草稿时延', compose_final_seconds: '终版时延' }
 function detail(name, check) {
   if (name === 'text') return check.model || ''
-  if (name === 'tts') return check.provider || ''
+  if (name === 'tts') {
+    const parts = [check.provider || '']
+    if (check.amphion_ready) parts.push('自建就绪')
+    else if ((check.provider || '').indexOf('amphion') >= 0) parts.push('自建不可用')
+    if (check.cooldown) parts.push('冷却 ' + check.cooldown + 's')
+    return parts.filter(Boolean).join(' · ')
+  }
   if (name === 'disk') return (check.percent || 0) + '% · 剩余 ' + (check.free_gb || 0) + 'G'
   if (name === 'asr') return check.managed ? '托管凭证' : '网关密钥'
   return check.built === false ? '未构建' : ''
