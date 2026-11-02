@@ -45,6 +45,7 @@ try:
     from .journey_text import router as journey_text_router
     from .journey_text import configuration as text_configuration
     from .journey_text import fallback_configuration as text_fallback_configuration
+    from .journey_text import primary_status as text_primary_status
     from .journey_text import strip_disclaimers
     from .journey_image import router as journey_image_router
     from .security import RequestLimits, compose_access
@@ -54,6 +55,7 @@ except ImportError:
     from journey_text import router as journey_text_router
     from journey_text import configuration as text_configuration
     from journey_text import fallback_configuration as text_fallback_configuration
+    from journey_text import primary_status as text_primary_status
     from journey_text import strip_disclaimers
     from journey_image import router as journey_image_router
     from security import RequestLimits, compose_access
@@ -204,7 +206,7 @@ def frontend_check():
 TEXT_DOWN_CODES = {'text_balance', 'text_upstream_error', 'text_auth', 'text_timeout', 'text_connection_failed'}
 
 
-def text_check():
+async def text_check():
     try:
         config = text_configuration()
         fallback = text_fallback_configuration()
@@ -212,10 +214,16 @@ def text_check():
         recent = [item for item in metrics_store.recent_errors(900)
                   if str(item.get('path', '')).startswith('/api/journey/compose')
                   and item.get('code') in TEXT_DOWN_CODES]
-        return {'ok': (configured or bool(fallback)) and not recent, 'model': config.get('model') or '',
-                'fallback': (fallback or {}).get('model', ''), 'recent_failures': len(recent)}
+        primary = await text_primary_status() if configured else None
+        primary_ok = primary.get('ok') if primary else None
+        balance = primary.get('balance') if primary else None
+        ok = (configured or bool(fallback)) and not recent and (primary is None or bool(primary_ok))
+        return {'ok': ok, 'model': config.get('model') or '',
+                'fallback': (fallback or {}).get('model', ''), 'recent_failures': len(recent),
+                'balance': balance, 'primary_ok': primary_ok}
     except Exception:  # HTTPException from an unreadable config file.
-        return {'ok': False, 'model': '', 'fallback': '', 'recent_failures': 0}
+        return {'ok': False, 'model': '', 'fallback': '', 'recent_failures': 0,
+                'balance': None, 'primary_ok': None}
 
 
 def image_check():
@@ -226,15 +234,16 @@ def image_check():
     return {'ok': not recent, 'recent_failures': len(recent), 'detail': detail}
 
 
-def asr_check():
+async def asr_check():
     managed = managed_asr.enabled()
     if not managed:
         return {'ok': True, 'managed': False, 'detail': 'gateway key'}
     try:
         managed_asr.configuration()
+        await managed_asr.mint_token()
         return {'ok': True, 'managed': True}
-    except Exception:
-        return {'ok': False, 'managed': True}
+    except Exception as error:
+        return {'ok': False, 'managed': True, 'detail': type(error).__name__}
 
 
 async def tts_check():
@@ -262,8 +271,8 @@ def disk_check():
 async def health_checks():
     return {
         'frontend': frontend_check(),
-        'text': text_check(),
-        'asr': asr_check(),
+        'text': await text_check(),
+        'asr': await asr_check(),
         'tts': await tts_check(),
         'image': image_check(),
         'disk': disk_check(),
@@ -286,7 +295,16 @@ def build_alerts(checks, snapshot):
         if name == 'disk':
             detail = f"{check.get('percent', 0)}% 已用，剩余 {check.get('free_gb', 0)}G"
         elif name == 'text':
-            detail = '主模型与兜底均不可用' if check.get('recent_failures') else '配置不完整'
+            if check.get('primary_ok') is False and check.get('balance') is not None:
+                detail = 'DeepSeek 余额不足（' + str(check.get('balance')) + '），已降级 ' + str(check.get('fallback') or '兜底')
+            elif check.get('recent_failures'):
+                detail = '主模型与兜底均不可用'
+            else:
+                detail = '配置不完整'
+        elif name == 'asr':
+            detail = str(check.get('detail') or '语音识别探针失败')
+        elif name == 'tts':
+            detail = '声音合成探针失败'
         elif name == 'image':
             detail = str(check.get('detail') or '插画接口失败')[:40]
         else:
@@ -695,7 +713,12 @@ let openSessions = new Set()
 const EVENT_LABELS = { compose_draft: '草稿上屏', compose_final: '审校完成', compose_review_fallback: '审校回退', compose_error: '整理失败', asr_session: '语音会话', illustrate: '插画请求', illustrate_error: '插画失败', tts_amphion_ok: '自建TTS成功', tts_amphion_fail: '自建TTS失败', tts_no_sample: '无参考音', tts_failover: '降级百炼', text_failover: '文本降级', tts_bailian_ok: '百炼成功', tts_bailian_fail: '百炼失败' }
 const LATENCY_LABELS = { compose_draft_seconds: '草稿时延', compose_final_seconds: '终版时延' }
 function detail(name, check) {
-  if (name === 'text') return (check.model || '') + (check.fallback ? ' → ' + check.fallback : '')
+  if (name === 'text') {
+    const chain = (check.model || '') + (check.fallback ? ' → ' + check.fallback : '')
+    if (check.primary_ok === false) return '主模型不可用' + (check.balance != null ? '（余额 ' + check.balance + '）' : '') + ' · ' + chain
+    return chain
+  }
+  if (name === 'asr') return check.detail || ''
   if (name === 'tts') {
     const parts = [check.provider || '']
     if (check.amphion_ready) parts.push('自建就绪')

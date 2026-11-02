@@ -68,8 +68,9 @@ JOURNEY_SESSION_AUDIO_MAX=120         # 最多保留多少条带音频的会话
 ## 看板告警条
 
 - 顶部红色“需要处理”条来自 `/api/admin/stats` 的 `alerts`：包含异常检查项和最近 15 分钟接口失败（按错误码计数），不依赖企业微信。
-- 企业微信推送仍需在 `/etc/amphion-gjh/monitor.env` 配置 `JOURNEY_ALERT_WEBHOOK`；为空时监控只写日志（`alert webhook not configured`），不会外发。
-- 检查项现在包括 `frontend/text/asr/tts/image/disk`；`text` 会因最近 15 分钟的真实上游失败（402/鉴权/超时等）降级，`image` 会因插画失败降级。
+- 告警推送在 `/etc/amphion-gjh/monitor.env` 配置 `JOURNEY_ALERT_WEBHOOK`：飞书群机器人（`open.feishu.cn/open-apis/bot/v2/hook/...`）和企业微信群机器人都支持，按域名自动选消息格式。为空时监控只写日志（`alert webhook not configured`），不会外发。
+- 检查项包括 `frontend/text/asr/tts/image/disk`：`text` 同时探测 DeepSeek 余额（`/user/balance`，低于 `JOURNEY_TEXT_MIN_BALANCE` 即降级）和最近 15 分钟上游失败；`asr` 会真实申请一次托管凭证；`tts` 探测自建 `/tts-api/ready`；`image` 看最近插画失败。
+- 告警在未恢复时每 30 分钟重提醒一次，恢复后发一条“已恢复”。
 
 ## 告警
 

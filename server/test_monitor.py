@@ -23,13 +23,14 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(monitor.checks_from(health('degraded')), [('service', False, '健康状态 degraded')])
         self.assertEqual(monitor.checks_from(health('ok')), [])
 
-    def test_alert_is_sent_once_and_reminded_after_ten_minutes(self):
+    def test_alert_is_sent_once_and_reminded_after_thirty_minutes(self):
         state = {}
         failing = [('disk', False, '磁盘 98%')]
         self.assertEqual(monitor.decide(state, failing, 1000.0), [('alert', 'disk', '磁盘 98%')])
         state['checks']['disk']['sent'] = 1000.0
         self.assertEqual(monitor.decide(state, failing, 1060.0), [])
-        self.assertEqual(monitor.decide(state, failing, 1601.0), [('alert', 'disk', '磁盘 98%')])
+        self.assertEqual(monitor.decide(state, failing, 1601.0), [])
+        self.assertEqual(monitor.decide(state, failing, 2801.0), [('alert', 'disk', '磁盘 98%')])
         state['checks']['disk']['sent'] = 1601.0
         self.assertEqual(monitor.decide(state, [('disk', True, '')], 1700.0), [('recover', 'disk', '')])
         self.assertEqual(monitor.decide(state, [('disk', True, '')], 1800.0), [])
@@ -116,3 +117,17 @@ class MonitorRetryTests(unittest.TestCase):
         with patch.object(monitor, 'load_health', fake), patch.object(monitor.time, 'sleep'):
             self.assertEqual(monitor.load_health_retry('http://unused'), health('ok'))
         self.assertEqual(len(calls), 2)
+
+
+class WebhookPayloadTests(unittest.TestCase):
+    def test_feishu_uses_a_text_message(self):
+        payload = monitor.webhook_payload('https://open.feishu.cn/open-apis/bot/v2/hook/abc', '**异常**')
+        self.assertEqual(payload, {'msg_type': 'text', 'content': {'text': '异常'}})
+
+    def test_wecom_keeps_markdown(self):
+        payload = monitor.webhook_payload('https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=x', '**异常**')
+        self.assertEqual(payload, {'msgtype': 'markdown', 'markdown': {'content': '**异常**'}})
+
+    def test_text_detail_reports_a_missing_balance(self):
+        detail = monitor.check_detail('text', {'ok': False, 'primary_ok': False, 'balance': -0.02})
+        self.assertIn('-0.02', detail)

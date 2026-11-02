@@ -276,6 +276,41 @@ def retry_prompt(error, english):
     return ("上次结果未通过检查：" + str(error)[:300] + "。请重新核对全文，严格按系统要求返回合法JSON：note_text优先写成两句完整连贯的话，通常40至70字、最多80字，必要时才用1句或3句；只输出正文，不要标题、称呼、落款、日期、标签、引号、要点、解释或多个版本。保留原文具体细节、条件、否定和不确定性，不新增信息。message最多50个字符（含标点），超长就重写完整短句，不能截断。清除口癖，以未来的自己回应今天的你，第一句直接回应具体牵挂，不问好、不夸人格、不复读原文。takeaway原样取message一句完整话。anchors必须是原文中真实的连续片段，sketch_prompt必须是具体可见的单幅场景；如果原文只是产品或页面反馈，不要把它写成未来愿望。")
 
 
+PRIMARY_STATUS_TTL = 60
+_primary_status = {'at': 0.0, 'value': None}
+
+
+async def primary_status(timeout=5):
+    """Return DeepSeek balance/availability; None for other providers."""
+    config = configuration()
+    if 'api.deepseek.com' not in str(config.get('url', '')):
+        return None
+    now = time.monotonic()
+    if now - _primary_status['at'] < PRIMARY_STATUS_TTL and _primary_status['value'] is not None:
+        return _primary_status['value']
+    endpoint = str(config['url']).split('/chat/completions')[0] + '/user/balance'
+    try:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            response = await client.get(endpoint, headers={'Authorization': 'Bearer ' + config['api_key']})
+        if response.status_code != 200:
+            value = {'ok': False, 'available': False, 'balance': None, 'detail': 'HTTP ' + str(response.status_code)}
+        else:
+            payload = response.json()
+            infos = payload.get('balance_infos') or []
+            total = sum(float(item.get('total_balance') or 0) for item in infos if isinstance(item, dict))
+            try:
+                minimum = float(os.environ.get('JOURNEY_TEXT_MIN_BALANCE', '1'))
+            except ValueError:
+                minimum = 1.0
+            available = bool(payload.get('is_available'))
+            value = {'ok': available and total >= minimum, 'available': available,
+                     'balance': round(total, 2), 'detail': '' if available and total >= minimum else '余额不足'}
+    except Exception as error:  # noqa: BLE001 - the health probe must never raise
+        value = {'ok': False, 'available': False, 'balance': None, 'detail': type(error).__name__}
+    _primary_status.update(at=now, value=value)
+    return value
+
+
 def compose_configuration(request):
     if not request.transcript.strip():
         raise HTTPException(422, detail={"code": "empty_transcript", "message": "还没有记录到讲述。"})

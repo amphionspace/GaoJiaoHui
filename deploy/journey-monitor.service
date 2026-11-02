@@ -1,5 +1,5 @@
 [Unit]
-Description=Journey service monitor (WeCom alerts)
+Description=Journey service monitor (Feishu/WeCom alerts)
 Wants=network-online.target
 After=network-online.target amphion-gjh.service
 

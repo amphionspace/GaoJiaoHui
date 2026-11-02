@@ -1,4 +1,4 @@
-"""Poll the local health endpoint and push state changes to a WeCom robot.
+"""Poll the local health endpoint and push state changes to a Feishu/WeCom robot.
 
 Run by journey-monitor.timer every minute. Only aggregate status is read: the
 monitor never sees or stores a transcript, audio, key or admin credential. The
@@ -11,10 +11,11 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit
 
 DEFAULT_URL = 'http://127.0.0.1:8766/api/health'
 DEFAULT_STATE = '/var/lib/amphion-gjh/monitor.json'
-REMIND_SECONDS = 600
+REMIND_SECONDS = 1800
 
 CHECK_LABELS = {
     'service': '服务可达性',
@@ -22,6 +23,7 @@ CHECK_LABELS = {
     'text': '文本模型',
     'asr': '语音识别',
     'tts': '声音合成',
+    'image': '插画服务',
     'disk': '磁盘',
 }
 
@@ -35,10 +37,17 @@ def check_detail(name, check):
     if name == 'disk':
         return '磁盘 ' + str(check.get('percent')) + '%（剩余 ' + str(check.get('free_gb')) + 'G）'
     if name == 'text':
-        return '文本模型 ' + (check.get('model') or '未配置')
+        if check.get('primary_ok') is False:
+            balance = check.get('balance')
+            return 'DeepSeek 不可用' + (('（余额 ' + str(balance) + '）') if balance is not None else '')
+        return '文本模型 ' + (check.get('model') or '未配置') + ((' → ' + check['fallback']) if check.get('fallback') else '')
     if name == 'tts':
         return '声音合成 ' + (check.get('provider') or '未配置')
+    if name == 'image':
+        return '插画 ' + str(check.get('detail') or '可用')
     if name == 'asr':
+        if not check.get('ok') and check.get('detail'):
+            return '语音识别 ' + str(check.get('detail'))
         return '托管凭证' if check.get('managed') else '网关密钥'
     if name == 'frontend':
         return '已构建' if check.get('built') else '未构建'
@@ -100,19 +109,31 @@ def build_message(kind, key, detail, public_url=''):
     return '\n'.join(lines)
 
 
+def is_feishu(webhook):
+    host = (urlsplit(webhook).hostname or '').lower()
+    return host.endswith('feishu.cn') or host.endswith('larksuite.com')
+
+
+def webhook_payload(webhook, text):
+    if is_feishu(webhook):
+        return {'msg_type': 'text', 'content': {'text': text.replace('**', '')}}
+    return {'msgtype': 'markdown', 'markdown': {'content': text}}
+
+
 def send_webhook(webhook, text, timeout=5):
-    payload = json.dumps({'msgtype': 'markdown', 'markdown': {'content': text}}, ensure_ascii=False).encode('utf-8')
+    payload = json.dumps(webhook_payload(webhook, text), ensure_ascii=False).encode('utf-8')
     request = urllib.request.Request(webhook, data=payload, headers={'Content-Type': 'application/json'}, method='POST')
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read(2048)
         data = json.loads(body) if body else {}
-        if isinstance(data, dict) and data.get('errcode') not in (None, 0):
-            print('wecom rejected the alert: errcode', data.get('errcode'))
+        code = data.get('errcode', data.get('code', data.get('StatusCode'))) if isinstance(data, dict) else 0
+        if code not in (None, 0):
+            print('webhook rejected the alert: code', code)
             return False
         return True
     except (OSError, ValueError) as error:
-        print('wecom alert failed:', type(error).__name__)
+        print('alert webhook failed:', type(error).__name__)
         return False
 
 
