@@ -65,6 +65,12 @@ JOURNEY_SESSION_AUDIO_MAX=120         # 最多保留多少条带音频的会话
 - 记录只通过 `/api/admin/sessions` 暴露，需要后台 Basic 认证；服务端写入失败不会影响访客拿到手记。
 - 隐私建议：展期结束或移交设备前，用“清空”按钮删除记录与音频；不需要复盘时把 `JOURNEY_SESSION_LOG=0` 并重启。访客录音、参考音与回信语音都可用于识别说话人，按与讲述同等级别保管；首页隐私说明会在开启会话记录时提示保留期。
 
+## 看板告警条
+
+- 顶部红色“需要处理”条来自 `/api/admin/stats` 的 `alerts`：包含异常检查项和最近 15 分钟接口失败（按错误码计数），不依赖企业微信。
+- 企业微信推送仍需在 `/etc/amphion-gjh/monitor.env` 配置 `JOURNEY_ALERT_WEBHOOK`；为空时监控只写日志（`alert webhook not configured`），不会外发。
+- 检查项现在包括 `frontend/text/asr/tts/image/disk`；`text` 会因最近 15 分钟的真实上游失败（402/鉴权/超时等）降级，`image` 会因插画失败降级。
+
 ## 告警
 
 `journey-monitor.timer` 每分钟运行 `journey-monitor.service`，读取本机 `/api/health`：

@@ -85,6 +85,16 @@ class AdminTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('journey_admin_session=', response.headers['set-cookie'])
         self.assertIn('Max-Age=0', response.headers['set-cookie'])
 
+    async def test_recent_business_failures_raise_an_admin_alert(self):
+        main.metrics_store.error('/api/journey/illustrate', 503, 'illustrate_quota')
+        with patch.dict('os.environ', ADMIN_ENV):
+            async with client() as api:
+                response = await api.get('/api/admin/stats', headers=basic())
+        data = response.json()
+        self.assertEqual(data['status'], 'degraded')
+        self.assertFalse(data['checks']['image']['ok'])
+        self.assertTrue(any('插画服务' in item for item in data['alerts']))
+
     async def test_stats_expose_aggregates_without_content(self):
         with patch.dict('os.environ', ADMIN_ENV):
             async with client() as api:

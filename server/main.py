@@ -201,15 +201,29 @@ def frontend_check():
     return {'ok': built, 'built': built}
 
 
+TEXT_DOWN_CODES = {'text_balance', 'text_upstream_error', 'text_auth', 'text_timeout', 'text_connection_failed'}
+
+
 def text_check():
     try:
         config = text_configuration()
         fallback = text_fallback_configuration()
         configured = bool(config.get('url') and config.get('model'))
-        return {'ok': configured or bool(fallback), 'model': config.get('model') or '',
-                'fallback': (fallback or {}).get('model', '')}
+        recent = [item for item in metrics_store.recent_errors(900)
+                  if str(item.get('path', '')).startswith('/api/journey/compose')
+                  and item.get('code') in TEXT_DOWN_CODES]
+        return {'ok': (configured or bool(fallback)) and not recent, 'model': config.get('model') or '',
+                'fallback': (fallback or {}).get('model', ''), 'recent_failures': len(recent)}
     except Exception:  # HTTPException from an unreadable config file.
-        return {'ok': False, 'model': '', 'fallback': ''}
+        return {'ok': False, 'model': '', 'fallback': '', 'recent_failures': 0}
+
+
+def image_check():
+    recent = [item for item in metrics_store.recent_errors(900)
+              if str(item.get('path', '')).startswith('/api/journey/illustrate')]
+    codes = [str(item.get('code', '')) for item in recent]
+    detail = '额度不足' if 'illustrate_quota' in codes else (codes[0] if codes else '')
+    return {'ok': not recent, 'recent_failures': len(recent), 'detail': detail}
 
 
 def asr_check():
@@ -251,12 +265,43 @@ async def health_checks():
         'text': text_check(),
         'asr': asr_check(),
         'tts': await tts_check(),
+        'image': image_check(),
         'disk': disk_check(),
     }
 
 
 def health_status(checks):
     return 'ok' if all(item['ok'] for item in checks.values()) else 'degraded'
+
+
+ALERT_LABELS = {'frontend': '前端构建', 'text': '文本服务', 'asr': '语音识别',
+                'tts': '声音合成', 'image': '插画服务', 'disk': '磁盘'}
+
+
+def build_alerts(checks, snapshot):
+    alerts = []
+    for name, check in checks.items():
+        if check.get('ok'):
+            continue
+        if name == 'disk':
+            detail = f"{check.get('percent', 0)}% 已用，剩余 {check.get('free_gb', 0)}G"
+        elif name == 'text':
+            detail = '主模型与兜底均不可用' if check.get('recent_failures') else '配置不完整'
+        elif name == 'image':
+            detail = str(check.get('detail') or '插画接口失败')[:40]
+        else:
+            detail = '检查异常'
+        alerts.append(f"{ALERT_LABELS.get(name, name)}异常：{detail}")
+    recent = metrics_store.recent_errors(900)
+    if recent:
+        counts = {}
+        for item in recent:
+            code = str(item.get('code') or 'error')
+            counts[code] = counts.get(code, 0) + 1
+        top = sorted(counts.items(), key=lambda item: -item[1])[:4]
+        alerts.append('最近 15 分钟接口失败 ' + str(len(recent)) + ' 次：' +
+                      '、'.join(f'{code}×{count}' for code, count in top))
+    return alerts
 
 
 ADMIN_COOKIE = 'journey_admin_session'
@@ -519,6 +564,7 @@ async def admin_stats():
         'release': os.path.basename(ROOT), 'version': VERSION, 'status': health_status(checks),
         'processed_at': time.strftime('%Y-%m-%d %H:%M:%S'),
         'uptime_seconds': snapshot['uptime_seconds'], 'checks': checks, 'stats': snapshot,
+        'alerts': build_alerts(checks, snapshot),
     }
 
 
@@ -587,6 +633,8 @@ footer{color:var(--dim);font-size:12px;line-height:1.8}
 button{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:7px;padding:7px 14px;cursor:pointer;font-size:12px}
 button:hover{border-color:var(--acc);color:var(--acc)}
 .alert{background:#fbe9e3;border-color:#f0c9bd;color:#8f3b24}
+.alert ul{margin:6px 0 0 18px;padding:0}
+.alert li{margin:2px 0;font-size:12.5px}
 .metric-value{font-size:34px;font-weight:700;color:#1c6bb0;line-height:1.1}
 .metric-value.bad{color:var(--bad)}
 .session-body audio{width:100%;max-width:420px;height:34px}
@@ -635,13 +683,13 @@ details.session summary .s-meta{color:var(--dim);font-size:11px;white-space:nowr
   </section>
   <section class="card"><h2>接口</h2><div id="paths"></div><p class="note">流式接口（compose/stream）的时延为首字节时间；草稿与终版的实际时延见上方“阶段时延”。</p></section>
   <section class="card"><h2>最近错误</h2><div id="errors"></div></section>
-  <footer>看板默认只统计聚合数据；会话记录可在服务器开启并自动过期，音频始终不保存。企业微信告警由 journey-monitor.timer 每分钟检查并推送。</footer>
+  <footer>看板默认只统计聚合数据；会话记录可在服务器开启并自动过期，音频始终不保存。企业微信告警由 journey-monitor.timer 每分钟检查并推送，需在 /etc/amphion-gjh/monitor.env 配置 JOURNEY_ALERT_WEBHOOK；未配置时只在本页提示。</footer>
 </main>
 <script>
 const $ = id => document.getElementById(id)
 const esc = value => String(value == null ? '' : value).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
 const dot = ok => '<span class="dot ' + (ok ? 'ok' : 'bad') + '"></span>'
-const CHECK_LABELS = { frontend: '前端构建', text: '文本模型', asr: '语音识别', tts: '声音合成', disk: '磁盘' }
+const CHECK_LABELS = { frontend: '前端构建', text: '文本模型', asr: '语音识别', tts: '声音合成', image: '插画服务', disk: '磁盘' }
 const TOPIC_LABELS = { future: '未来', product: '产品', idea: '想法', story: '故事' }
 let openSessions = new Set()
 const EVENT_LABELS = { compose_draft: '草稿上屏', compose_final: '审校完成', compose_review_fallback: '审校回退', compose_error: '整理失败', asr_session: '语音会话', illustrate: '插画请求', illustrate_error: '插画失败', tts_amphion_ok: '自建TTS成功', tts_amphion_fail: '自建TTS失败', tts_no_sample: '无参考音', tts_failover: '降级百炼', text_failover: '文本降级', tts_bailian_ok: '百炼成功', tts_bailian_fail: '百炼失败' }
@@ -655,6 +703,7 @@ function detail(name, check) {
     if (check.cooldown) parts.push('冷却 ' + check.cooldown + 's')
     return parts.filter(Boolean).join(' · ')
   }
+  if (name === 'image') return check.recent_failures ? check.recent_failures + ' 次失败' : ''
   if (name === 'disk') return (check.percent || 0) + '% · 剩余 ' + (check.free_gb || 0) + 'G'
   if (name === 'asr') return check.managed ? '托管凭证' : '网关密钥'
   return check.built === false ? '未构建' : ''
@@ -667,6 +716,14 @@ function uptime(seconds) {
   return '已运行 ' + minutes + ' 分'
 }
 function render(data) {
+  const alerts = data.alerts || []
+  const box = $('alert')
+  if (alerts.length) {
+    box.hidden = false
+    box.innerHTML = '<b>需要处理</b><ul>' + alerts.map(item => '<li>' + esc(item) + '</li>').join('') + '</ul>'
+  } else {
+    box.hidden = true
+  }
   $('meta-release').textContent = data.release || ''
   $('meta-version').textContent = 'v' + (data.version || '')
   $('meta-uptime').textContent = uptime(data.uptime_seconds)
@@ -770,7 +827,6 @@ async function refresh() {
     const response = await fetch('/api/admin/stats', { cache: 'no-store' })
     if (!response.ok) throw new Error('HTTP ' + response.status)
     render(await response.json())
-    $('alert').hidden = true
   } catch (error) {
     const box = $('alert')
     box.hidden = false

@@ -307,7 +307,7 @@ def fallback_configuration():
     key = str(config.get("api_key", "")).strip()
     if not base or not key:
         return None
-    return {"url": base + "/chat/completions", "model": model or "qwen-flash", "api_key": key}
+    return {"url": base + "/chat/completions", "model": model or "qwen-plus", "api_key": key}
 
 
 async def _compose_with(config, request, session_id, started, deadline):

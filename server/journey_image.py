@@ -141,7 +141,8 @@ async def generate_sketch(summary):
     except HTTPException as error:
         metrics.event('illustrate_error')
         detail = error.detail if isinstance(error.detail, str) else ''
-        metrics.error('/api/journey/illustrate', error.status_code, detail[:40])
+        code = 'illustrate_quota' if '额度' in detail else ('illustrate_error' if error.status_code >= 500 else 'illustrate_rejected')
+        metrics.error('/api/journey/illustrate', error.status_code, code)
         raise
 
 

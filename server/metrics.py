@@ -76,6 +76,7 @@ class Metrics:
     def error(self, path, status, code=''):
         with self.lock:
             self.errors.appendleft({
+                'ts': time.time(),
                 'at': time.strftime('%H:%M:%S', time.localtime()),
                 'path': path, 'status': status, 'code': str(code)[:60],
             })
@@ -87,6 +88,11 @@ class Metrics:
         total = len(self.recent)
         errors = sum(1 for _, status in self.recent if status >= 500)
         return {'window_seconds': RECENT_WINDOW, 'total': total, 'errors': errors}
+
+    def recent_errors(self, seconds=900):
+        cutoff = time.time() - seconds
+        with self.lock:
+            return [dict(item) for item in self.errors if item.get('ts', 0) >= cutoff]
 
     def snapshot(self):
         with self.lock:

@@ -36,7 +36,7 @@ HOST=127.0.0.1 PORT=8766 .venv/bin/python -m server.main
 
 - 右上角“连接设置”允许体验者填写自己的语音网关密钥，保存在当前浏览器，刷新后保留；不得写入仓库或前端构建。它不是服务器登录密码，也不是百炼或 DeepSeek 的服务端密钥。
 - 文本模型使用根目录 `.env.journey.json`，字段为 `url`、`model`、`api_key`，结构见 [示例](server/journey-config.example.json)。该文件被 Git 忽略，建议权限 600。不要把实际密钥发到聊天或提交记录中。
-- 也可使用 `JOURNEY_LLM_URL`、`JOURNEY_LLM_MODEL`、`JOURNEY_LLM_API_KEY`，环境变量优先；模型配置每次请求读取。DeepSeek 余额不足/鉴权失败/超时且尚未出草稿时，自动降级到百炼 `qwen-flash`（`JOURNEY_LLM_FALLBACK_*` 可覆盖），看板记“文本降级”。
+- 也可使用 `JOURNEY_LLM_URL`、`JOURNEY_LLM_MODEL`、`JOURNEY_LLM_API_KEY`，环境变量优先；模型配置每次请求读取。DeepSeek 余额不足/鉴权失败/超时且尚未出草稿时，自动降级到百炼 `qwen-plus`（`JOURNEY_LLM_FALLBACK_*` 可覆盖），看板记“文本降级”。
 - 百炼 TTS 使用根目录 `.env.bailian.json`，保存业务空间、北京地域地址和服务端 API Key，文件被 Git 忽略且应为权限 600。当前适配 `qwen-voice-enrollment` 创建临时音色，再用同一 `qwen3.5-omni-plus` 模型流式合成本人声音；密钥不会下发到浏览器。
 - `JOURNEY_TTS_PROVIDER=bailian` 启用百炼适配器，`JOURNEY_TTS_PROVIDER=legacy` 使用原有 `/v1/audio/voices` 网关协议。提供方只影响未来手记 TTS，不改变 ASR 与文本接口。
 - 语音 HTTP/WS 地址见 [运行配置示例](deploy/runtime.env.example)。前端启动时读取 `/api/config`，不需要为换网关重新构建。

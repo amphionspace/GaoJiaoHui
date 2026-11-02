@@ -46,7 +46,7 @@ class MetricsTests(unittest.TestCase):
             metrics.error('/api/journey/compose/stream', 504, 'text_timeout')
         snapshot = metrics.snapshot()
         self.assertEqual(len(snapshot['errors']), 40)
-        self.assertEqual(set(snapshot['errors'][0]), {'at', 'path', 'status', 'code'})
+        self.assertEqual(set(snapshot['errors'][0]), {'ts', 'at', 'path', 'status', 'code'})
 
 
 if __name__ == '__main__':

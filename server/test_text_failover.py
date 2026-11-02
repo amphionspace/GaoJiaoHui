@@ -72,7 +72,7 @@ class TextFailoverTests(unittest.IsolatedAsyncioTestCase):
                    return_value={'compatible_base_url': 'https://bailian.test/compatible-mode/v1', 'api_key': 'key'}):
             config = journey_text.fallback_configuration()
         self.assertEqual(config['url'], 'https://bailian.test/compatible-mode/v1/chat/completions')
-        self.assertEqual(config['model'], 'qwen-flash')
+        self.assertEqual(config['model'], 'qwen-plus')
         self.assertEqual(config['api_key'], 'key')
 
 
