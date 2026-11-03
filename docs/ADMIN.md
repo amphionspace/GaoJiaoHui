@@ -71,7 +71,7 @@ JOURNEY_SESSION_AUDIO_MAX=120         # 最多保留多少条带音频的会话
 - 告警推送在 `/etc/amphion-gjh/monitor.env` 配置 `JOURNEY_ALERT_WEBHOOK`：飞书群机器人（`open.feishu.cn/open-apis/bot/v2/hook/...`）和企业微信群机器人都支持，按域名自动选消息格式。为空时监控只写日志（`alert webhook not configured`），不会外发。
 - 检查项包括 `frontend/api/text/asr/tts/image/disk`：`api` 每分钟在进程内调用 `/`、`/api/config` 和四个业务路由（`compose`、`compose/stream`、`illustrate`、`asr-session`），只看是否返回 5xx 或超时；这些探针请求不带密钥、不生成内容、不写会话，也不计入请求统计。`text` 同时探测 DeepSeek 余额（`/user/balance`，低于 `JOURNEY_TEXT_MIN_BALANCE` 即降级）和最近 15 分钟上游失败；`asr` 会真实申请一次托管凭证；`tts` 探测自建 `/tts-api/ready`；`image` 看最近一次插画结果（失败后保持降级，成功生成一次后恢复）。
 - 任一检查项失败时，除群通知外还会以 `api_unavailable` / `health_<检查项>` 错误码写入后台“接口错误”：首次失败立即记录，同一故障 15 分钟内不重复写入，恢复后再次失败会重新记录。
-- 告警在未恢复时每 30 分钟重提醒一次，恢复后发一条“已恢复”。
+- 告警在未恢复时每 30 分钟重提醒一次，恢复后发一条“已恢复”。同一检查项需**连续两次检测失败**才推送（约 2 分钟），避免余额查询等探针的瞬时抖动频繁打扰群；恢复通知仍是即时发送。
 
 ## 告警
 

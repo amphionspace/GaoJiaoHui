@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 DEFAULT_URL = 'http://127.0.0.1:8766/api/health'
 DEFAULT_STATE = '/var/lib/amphion-gjh/monitor.json'
 REMIND_SECONDS = 1800
+STRIKES = 2
 
 CHECK_LABELS = {
     'service': '服务可达性',
@@ -84,19 +85,29 @@ def save_state(path, state):
     temporary.replace(path)
 
 
-def decide(state, checks, now):
-    """Return (kind, key, detail) notifications and update the active flags."""
+def decide(state, checks, now, strikes=STRIKES):
+    """Return (kind, key, detail) notifications and update the active flags.
+
+    A check must fail the configured number of consecutive runs before it pages:
+    single-sample probe errors (DNS blips, a slow balance request) used to page
+    the group and recover a minute later. Recovery is still immediate.
+    """
     previous = state.setdefault('checks', {})
     notifications = []
     for key, ok, detail in checks:
         entry = previous.setdefault(key, {'active': False, 'sent': 0})
         if not ok:
+            entry['fails'] = entry.get('fails', 0) + 1
+            if entry['fails'] < strikes:
+                continue
             if not entry.get('active') or now - entry.get('sent', 0) >= REMIND_SECONDS:
                 notifications.append(('alert', key, detail))
             entry['active'] = True
-        elif entry.get('active'):
-            notifications.append(('recover', key, detail))
-            entry['active'] = False
+        else:
+            entry['fails'] = 0
+            if entry.get('active'):
+                notifications.append(('recover', key, detail))
+                entry['active'] = False
     return notifications
 
 

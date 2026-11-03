@@ -26,14 +26,24 @@ class MonitorTests(unittest.TestCase):
     def test_alert_is_sent_once_and_reminded_after_thirty_minutes(self):
         state = {}
         failing = [('disk', False, '磁盘 98%')]
-        self.assertEqual(monitor.decide(state, failing, 1000.0), [('alert', 'disk', '磁盘 98%')])
-        state['checks']['disk']['sent'] = 1000.0
-        self.assertEqual(monitor.decide(state, failing, 1060.0), [])
-        self.assertEqual(monitor.decide(state, failing, 1601.0), [])
-        self.assertEqual(monitor.decide(state, failing, 2801.0), [('alert', 'disk', '磁盘 98%')])
-        state['checks']['disk']['sent'] = 1601.0
-        self.assertEqual(monitor.decide(state, [('disk', True, '')], 1700.0), [('recover', 'disk', '')])
-        self.assertEqual(monitor.decide(state, [('disk', True, '')], 1800.0), [])
+        self.assertEqual(monitor.decide(state, failing, 1000.0), [])
+        self.assertEqual(monitor.decide(state, failing, 1060.0), [('alert', 'disk', '磁盘 98%')])
+        state['checks']['disk']['sent'] = 1060.0
+        self.assertEqual(monitor.decide(state, failing, 1120.0), [])
+        self.assertEqual(monitor.decide(state, failing, 2801.0), [])
+        self.assertEqual(monitor.decide(state, failing, 2861.0), [('alert', 'disk', '磁盘 98%')])
+        state['checks']['disk']['sent'] = 2861.0
+        self.assertEqual(monitor.decide(state, [('disk', True, '')], 2900.0), [('recover', 'disk', '')])
+        self.assertEqual(monitor.decide(state, [('disk', True, '')], 3000.0), [])
+
+    def test_a_single_failed_sample_does_not_page_the_group(self):
+        state = {}
+        failing = [('text', False, 'DeepSeek 不可用')]
+        self.assertEqual(monitor.decide(state, failing, 1000.0), [])
+        self.assertEqual(monitor.decide(state, [('text', True, '文本模型')], 1060.0), [])
+        self.assertEqual(monitor.decide(state, failing, 1120.0), [])
+        self.assertEqual(monitor.decide(state, failing, 1180.0), [('alert', 'text', 'DeepSeek 不可用')])
+        self.assertEqual(monitor.decide(state, [('text', True, '')], 1240.0), [('recover', 'text', '')])
 
     def test_webhook_payload_is_wecom_markdown(self):
         seen = {}
