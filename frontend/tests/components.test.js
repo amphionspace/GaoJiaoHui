@@ -48,7 +48,7 @@ async function mount(name, options = {}) {
   class Voice {
     constructor() { voices.push(this) }
     register(blob) { this.blob = blob; return this.registration = options.voiceAudio ? Promise.resolve() : Promise.reject(new Error('sample rejected')) }
-    async synthesize(text) { this.spoken = text; return options.voiceAudio }
+    async synthesize(text) { this.spoken = text; if (options.voicePending) await options.voicePending.promise; return options.voiceAudio }
     dispose() { this.disposed = true }
   }
   class Socket extends EventTarget {
@@ -244,28 +244,31 @@ test('the introduction prefetches the ASR session before the visitor speaks', as
   app.unmount()
 })
 
-test('the note is readable while the editorial pass is still running', async () => {
-  const gate = deferred()
+test('the note stays behind the loading screen until the illustration settles', async () => {
+  const gate = deferred(), illustration = deferred()
   const { state, app } = await mount('BoothJourney', {
     compose: async (draft, options) => {
       options.onDraft({ ...draft, summary: '草稿正文', noteText: '草稿正文', messageToSelf: '草稿回信' })
       await gate.promise
       return { ...draft, summary: '最终正文', noteText: '最终正文', messageToSelf: '最终回信' }
     },
-    illustrate: async () => ({ sketch: 'image' }),
+    illustrate: () => illustration.promise,
   })
   state.journal = journey.createJourneyJournal('和家人去看雪山。', 'future')
   const task = state.composeNote()
   await tick(); await tick()
-  assert.equal(state.stage, 'preview')
+  assert.equal(state.stage, 'generating')
   assert.equal(state.journal.summary, '草稿正文')
   assert.equal(state.notePending, true)
-  gate.resolve()
-  await task
+  gate.resolve(); await tick()
+  assert.equal(state.stage, 'generating')
   assert.equal(state.journal.summary, '最终正文')
   assert.equal(state.notePending, false)
-  assert.equal(state.imageBusy, false)
+  illustration.resolve({ sketch: 'image' })
+  await task
+  assert.equal(state.stage, 'preview')
   assert.equal(state.journal.sketch, 'image')
+  assert.equal(state.imageBusy, false)
   app.unmount()
 })
 
@@ -328,7 +331,7 @@ test('illustration resolving after reset cannot restore the old journal', async 
   })
   state.journal = journey.createJourneyJournal('2036年，我想和爸妈旅行。', 'future')
   const job = state.composeNote(); await tick()
-  assert.equal(state.stage, 'preview')
+  assert.equal(state.stage, 'generating')
   state.reset()
   pending.resolve({ sketch: 'late' }); await job
   assert.equal(state.stage, 'welcome')
@@ -424,6 +427,29 @@ test('the cloned voice reads the complete short reply automatically and leaves t
   assert.equal(state.stage, 'preview')
   assert.equal(state.recording, false)
   assert.equal(recorders.length, 0)
+  app.unmount()
+})
+
+test('preparing the voice keeps the finished note on screen instead of returning to loading', async () => {
+  const speech = deferred()
+  const { state, voices, sounds, app } = await mount('BoothJourney', {
+    voiceAudio: new Blob(['test audio']),
+    voicePending: speech,
+    compose: async draft => ({ ...draft, summary: '我想让聊天接得更自然。', messageToSelf: '把想念留给相聚。', generation: 'model' }),
+  })
+  state.voiceEnabled = true
+  await state.prepareVoice(new Blob(['test reference']))
+  state.journal = journey.createJourneyJournal('我想试全双工，让聊天更自然。', 'future')
+  const task = state.composeNote()
+  await tick(); await tick(); await tick()
+  assert.equal(state.stage, 'preview')
+  assert.equal(state.voiceBusy, true)
+  assert.ok(state.journal.sketch)
+  speech.resolve(); await task
+  assert.equal(state.stage, 'preview')
+  assert.equal(state.voiceBusy, false)
+  assert.equal(voices[0].spoken, '把想念留给相聚。')
+  assert.equal(sounds[0].plays, 1)
   app.unmount()
 })
 
@@ -546,7 +572,7 @@ test('hiding the page stops capture but lets the pending illustration finish', a
   const task = state.composeNote(); await tick()
   document.hidden = true
   document.dispatchEvent(new Event('visibilitychange'))
-  assert.equal(state.stage, 'preview')
+  assert.equal(state.stage, 'generating')
   assert.equal(state.imageBusy, true)
   assert.equal(state.recording, false)
   pending.resolve({ sketch: 'completed-in-background' })

@@ -23,7 +23,7 @@ const connectionPhase = ref('microphone')
 const connectionLabel = computed(() => ({ microphone: '正在开启麦克风', speech: '正在准备倾听', connection: '正在接通语音服务' }[connectionPhase.value] || '正在接通'))
 const connectionHint = computed(() => ({ microphone: '如浏览器询问权限，请选择允许使用麦克风。', speech: '首次使用需要加载片刻，准备好后会提醒你开始。', connection: '麦克风已就绪，正在等待语音服务。' }[connectionPhase.value] || ''))
 const error = ref(''), notice = ref(''), voiceIssue = ref('')
-const imageIssue = ref(''), imageBusy = ref(false), notePending = ref(false)
+const imageIssue = ref(''), imageBusy = ref(false), notePending = ref(false), voiceBusy = ref(false)
 const transcriptWarning = ref('')
 const autoFinishSeconds = ref(0)
 const voiceEnabled = ref(false), voiceState = ref('waiting'), audioUrl = ref('')
@@ -120,12 +120,12 @@ function cancelSession() {
   notePending.value = false
   if (textRequest && journal.value?.summary && !journal.value.sketch) imageIssue.value = '插画生成已中断，文字手记已保留。请点击重试插画。'
   textRequest?.abort(); textRequest = null
-  imageBusy.value = false
+  imageBusy.value = false; voiceBusy.value = false
   voice?.dispose(); voice = null; candidate = null; finishing = false; lastVoiceError = ''
 }
 function reset() {
   cancelSession(); visitSession = ''; stage.value = 'welcome'; topicId.value = 'future'; text.value = ''; journal.value = null
-  error.value = notice.value = voiceIssue.value = imageIssue.value = ''; imageBusy.value = false
+  error.value = notice.value = voiceIssue.value = imageIssue.value = ''; imageBusy.value = false; voiceBusy.value = false
   transcriptWarning.value = ''
   followTranscript.value = true
   voiceState.value = 'waiting'; paused.value = textMode.value = printReturned.value = false
@@ -272,12 +272,13 @@ async function composeNote() {
   try {
     const result = await composeJourneyJournal(draft, {
       signal: controller.signal, apiKey: store.apiKey, language: store.locale, sessionId: journal.value.sessionId || currentSession(),
-      // The first pass returns a complete note; show it while the editorial pass runs.
+      // The first pass returns a complete note; keep the loading screen until
+      // the illustration settles so the visitor sees the letter only once.
       onDraft(partial) {
         if (!alive()) return
         journal.value = partial
         notePending.value = true
-        stage.value = 'preview'
+        busyLabel.value = '正在把你的想象画进手记'
         imageBusy.value = true
         illustrationJob = illustrate(partial)
       },
@@ -287,13 +288,13 @@ async function composeNote() {
     journal.value = { ...result, ...(journal.value?.sketch ? { sketch: journal.value.sketch, imageModel: journal.value.imageModel } : {}) }
     notePending.value = false
     busyLabel.value = '正在把你的想象画进手记'
-    stage.value = 'preview'                 // never hold the note behind the illustration
     if (!illustrationJob) { imageBusy.value = true; illustrationJob = illustrate(result) }
     await illustrationJob
     if (!alive()) return
     imageBusy.value = false
     textRequest = null
-    if (voiceEnabled.value && voice?.registration) await makeAudio(!document.hidden)
+    stage.value = 'preview'                 // one transition, already illustrated
+    if (voiceEnabled.value && voice?.registration) await makeAudio(!document.hidden, false, true)
     else if (voiceEnabled.value && !textMode.value) {
       voiceState.value = 'failed'
       voiceIssue.value = '清晰人声不足5秒，本次未能创建本人音色。请重新通话，连续讲述约10秒。'
@@ -318,11 +319,13 @@ async function retryIllustration() {
     if (textRequest === controller) { textRequest = null; imageBusy.value = false }
   }
 }
-async function makeAudio(autoplay = false, retry = false) {
+async function makeAudio(autoplay = false, retry = false, quiet = false) {
   if (!journal.value?.messageToSelf || !voiceEnabled.value) return
   stopRecording(); stopPlayback(); releaseAudio()
   const id = session, job = ++audioTask, revision = journal.value.revision
-  error.value = voiceIssue.value = ''; stage.value = 'generating'; busyLabel.value = '正在用你的声音，接通这封来自未来的回信'
+  error.value = voiceIssue.value = ''
+  voiceBusy.value = quiet
+  if (!quiet) stage.value = 'generating'; busyLabel.value = '正在用你的声音，接通这封来自未来的回信'
   try {
     if (retry && voiceState.value === 'failed' && !voice?.ready && candidate) {
       await voice?.dispose()
@@ -332,11 +335,15 @@ async function makeAudio(autoplay = false, retry = false) {
     if (!voice) throw new Error(lastVoiceError || '清晰录音不足，请重新开始通话后再试。')
     const blob = await voice.synthesize(journal.value.messageToSelf)
     if (id !== session || job !== audioTask || journal.value?.revision !== revision) return
-    audioUrl.value = URL.createObjectURL(blob); voiceState.value = 'ready'; stage.value = 'preview'; notice.value = ''
+    audioUrl.value = URL.createObjectURL(blob); voiceState.value = 'ready'; notice.value = ''
+    voiceBusy.value = false
+    if (!quiet) stage.value = 'preview'
     if (autoplay) await replay()
   } catch (e) {
     if (id !== session || job !== audioTask) return
-    stage.value = 'preview'; voiceState.value = 'failed'
+    voiceBusy.value = false
+    if (!quiet) stage.value = 'preview'
+    voiceState.value = 'failed'
     lastVoiceError = e.message
     voiceIssue.value = voiceFailureMessage(e)
   }
@@ -484,6 +491,7 @@ onBeforeUnmount(() => {
         <p v-if="imageIssue" class="journey-notice" role="status">{{ imageIssue }} <button class="journey-link" @click="retryIllustration">重试插画</button></p>
         <p v-if="notePending" class="journey-notice" role="status">正在最后核对措辞，文字已经可以阅读…</p>
         <p v-if="imageBusy" class="journey-notice" role="status">正在画下你的期待…</p>
+        <p v-if="voiceBusy" class="journey-notice" role="status">正在用你的声音读这封回信…</p>
         <button v-if="!journal.messageToSelf" class="journey-primary retry-note" @click="composeNote"><JourneyIcon name="RotateCcw" />重新整理</button>
         <template v-if="stage === 'printing'"><p class="journey-notice">{{ printReturned ? '打印窗口已关闭，请确认是否收到手记。' : '等待打印操作完成。' }}</p><div class="journey-actions"><button class="journey-primary" @click="complete"><JourneyIcon name="Check" />已收到手记</button><button class="journey-secondary" @click="backToPreview">返回预览</button></div></template>
         <template v-else>
