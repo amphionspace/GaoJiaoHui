@@ -24,6 +24,14 @@ class VoiceSampleTests(unittest.TestCase):
                 voice_samples.delete(VOICE)
                 self.assertIsNone(voice_samples.load(VOICE))
 
+    def test_reference_text_is_stored_and_deleted_with_sample(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict('os.environ', self.env(directory)):
+                self.assertTrue(voice_samples.save(VOICE, b'RIFFsample', '参考音频的原文'))
+                self.assertEqual(voice_samples.load_text(VOICE), '参考音频的原文')
+                voice_samples.delete(VOICE)
+                self.assertIsNone(voice_samples.load_text(VOICE))
+
     def test_invalid_names_and_oversize_samples_are_ignored(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch.dict('os.environ', self.env(directory)):

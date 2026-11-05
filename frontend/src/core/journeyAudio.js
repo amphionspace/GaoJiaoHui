@@ -504,10 +504,11 @@ export class JourneyVoice {
     if (this.sessionId) headers['X-Journey-Session'] = this.sessionId
     return api(path, { ...options, prefix: '/api/journey', headers })
   }
-  register(blob) {
+  register(blob, referenceText = '') {
     if (this.registration) return this.registration
     if (this.disposed) return Promise.reject(new DOMException('Cancelled', 'AbortError'))
     activeVoices.add(this.name)
+    this.referenceText = String(referenceText || '').trim().slice(0, 500)
     this.registration = this.registerSample(blob).catch(error => { error.stage = 'registration'; throw error })
     return this.registration
   }
@@ -518,6 +519,7 @@ export class JourneyVoice {
     const data = new FormData()
     data.append('voice_name', this.name)
     data.append('audio_file', blob, `${this.name}.wav`)
+    if (this.referenceText) data.append('reference_text', this.referenceText)
     // Persist before uploading: page termination can otherwise strand a server voice.
     rememberVoice(this.name)
     // The dedicated worker transcribes this exact sample and extracts its clone prompt.

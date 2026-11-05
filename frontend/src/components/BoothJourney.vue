@@ -230,7 +230,7 @@ function prepareVoice(blob) {
   const id = session
   const current = voice = new JourneyVoice(store.apiKey, currentSession())
   voiceState.value = 'registering'
-  return current.register(blob)
+  return current.register(blob, text.value)
     .then(() => { if (id === session && voice === current) voiceState.value = 'ready' })
     .catch(e => { if (id === session && voice === current) { lastVoiceError = e.message; voiceState.value = 'failed'; voiceIssue.value = voiceFailureMessage(e) } })
 }

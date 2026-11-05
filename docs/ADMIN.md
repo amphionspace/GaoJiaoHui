@@ -33,6 +33,15 @@ JOURNEY_ADMIN_PASSWORD=<长随机密码>
 - `/metrics`、脚本和 curl 仍支持 HTTP Basic（Prometheus 可用 `basic_auth`）；后台页面本身不再发送 `WWW-Authenticate`，所以不会出现系统弹窗。
 - 改密码后重启服务，旧会话立即失效。
 
+## 声音合成切换
+
+看板“声音合成”卡片提供四个按钮：自研+百炼、百炼、VoxCPM2、FireRedTTS3。点击后立即写入 `.journey-state/tts-settings.json`（0600），影响之后的合成；当前请求不会中断。
+
+- 未配置 `EVAL_TTS_API_KEY` 时，VoxCPM2 / FireRedTTS3 按钮禁用
+- 缺少参考音原文的旧音色会自动降级百炼
+- 切换失败会在顶部“接口错误”条显示原因
+- 状态卡片 `声音合成` 同时显示当前模式和就绪情况
+
 ## 看板怎么读
 
 - **总汇**：顶部五张卡片——今日体验、总体验、已生成（有手记）、已打印（点过打印并触发 `afterprint`）、异常（未生成出文字）。

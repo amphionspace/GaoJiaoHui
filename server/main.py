@@ -50,7 +50,7 @@ try:
     from .journey_image import router as journey_image_router
     from .security import RequestLimits, compose_access
     from .metrics import metrics as metrics_store
-    from . import amphion_tts, bailian_tts, managed_asr, sessions, voice_samples
+    from . import amphion_tts, bailian_tts, eval_tts, managed_asr, sessions, tts_settings, voice_samples
 except ImportError:
     from journey_text import router as journey_text_router
     from journey_text import configuration as text_configuration
@@ -60,7 +60,7 @@ except ImportError:
     from journey_image import router as journey_image_router
     from security import RequestLimits, compose_access
     from metrics import metrics as metrics_store
-    import amphion_tts, bailian_tts, managed_asr, sessions, voice_samples
+    import amphion_tts, bailian_tts, eval_tts, managed_asr, sessions, tts_settings, voice_samples
 
 UPSTREAM = os.environ.get('GATEWAY_URL', 'https://amphion.top').rstrip('/')
 UPSTREAM_HOST = urlsplit(UPSTREAM).hostname
@@ -321,7 +321,7 @@ async def asr_check():
 
 
 async def tts_check():
-    provider = os.environ.get('JOURNEY_TTS_PROVIDER', 'legacy').strip().lower() or 'legacy'
+    order = tts_settings.order()
     bailian_ok = True
     if bailian_tts.enabled():
         try:
@@ -329,10 +329,21 @@ async def tts_check():
         except Exception:
             bailian_ok = False
     primary = await amphion_tts.ready()
+    eval_configured = eval_tts.enabled()
+    eval_ok = False
+    if eval_configured:
+        try:
+            eval_tts.configuration()
+            eval_ok = True
+        except eval_tts.EvalTTSError:
+            eval_ok = False
+    eval_primary = order[0] if order and order[0] in eval_tts.MODELS else ''
     return {
-        'ok': bailian_ok or primary['ok'], 'provider': ' → '.join(amphion_tts.order()),
+        'ok': bailian_ok or primary['ok'] or bool(eval_primary and eval_ok),
+        'provider': ' → '.join(order), 'mode': tts_settings.mode(), 'label': tts_settings.label(),
         'bailian': bailian_ok, 'amphion_ready': primary['ok'],
         'amphion_ms': primary['latency_ms'], 'cooldown': amphion_tts.cooldown_remaining(),
+        'eval_configured': eval_configured, 'eval_ready': eval_ok,
     }
 
 
@@ -506,14 +517,33 @@ async def proxy(path: str, request: Request):
 
 
 async def synthesize_journey_speech(request, body):
-    """Primary Amphion TTS, then the Qwen/Bailian voice as a fallback."""
+    """Runtime-selected clone TTS, then the Bailian/Qwen fallback."""
     voice = str(body.get("voice", "")).strip()
     text = strip_disclaimers(str(body.get("input", "")).strip())
     if not voice or not text or len(text) > 600:
         raise HTTPException(400, "请提供有效的本人音色和朗读文字。")
     key = await bailian_tts.check_voice(request, voice)
     body["input"] = text
-    if amphion_tts.enabled() and not amphion_tts.cooling_down():
+    order = tts_settings.order()
+
+    if order and order[0] in eval_tts.MODELS:
+        model = order[0]
+        sample = voice_samples.load(voice)
+        reference_text = voice_samples.load_text(voice)
+        if sample and reference_text:
+            try:
+                audio = await eval_tts.synthesize(
+                    model, text, sample, reference_text, body.get("language", "Chinese")
+                )
+                metrics_store.event("tts_" + model + "_ok")
+                return audio
+            except eval_tts.EvalTTSError as error:
+                metrics_store.event("tts_" + model + "_fail")
+                print(model + " tts failed:", str(error)[:120], str(error.detail)[:120])
+        else:
+            metrics_store.event("tts_no_sample")
+
+    if "amphion" in order and not amphion_tts.cooling_down():
         sample = voice_samples.load(voice)
         if sample:
             try:
@@ -525,7 +555,10 @@ async def synthesize_journey_speech(request, body):
                 print("amphion tts failed:", str(error)[:80])
         else:
             metrics_store.event("tts_no_sample")
-    if "bailian" not in amphion_tts.order():
+
+    if "bailian" not in order:
+        if order and order[0] in eval_tts.MODELS:
+            raise HTTPException(502, "本人音色缺少参考原文，无法使用克隆合成；请重新讲述或切换百炼。")
         raise HTTPException(502, "自建语音合成暂时不可用，请稍后重试。")
     metrics_store.event("tts_failover")
     try:
@@ -553,7 +586,8 @@ async def journey_tts(path: str, request: Request):
             await audio_file.seek(0)
             result = await bailian_tts.create_voice(request, voice_name, audio_file)
             if 0 < len(sample) <= 2 * 1024 * 1024:
-                voice_samples.save(voice_name, sample)
+                reference_text = form.get('reference_text')
+                voice_samples.save(voice_name, sample, reference_text if isinstance(reference_text, str) else '')
                 if session_id:
                     sessions.save_audio(session_id, "sample", sample)
             return result
@@ -663,7 +697,25 @@ async def admin_stats():
         'uptime_seconds': snapshot['uptime_seconds'], 'checks': checks, 'stats': snapshot,
         'interface_errors': metrics_store.recent_errors(900),
         'alerts': build_alerts(checks, snapshot),
+        'tts': {**tts_settings.status(), 'eval_configured': eval_tts.enabled()},
     }
+
+
+class TtsMode(BaseModel):
+    mode: str = Field(min_length=1, max_length=32)
+
+
+@app.post('/api/admin/tts-order', dependencies=[Depends(require_admin)])
+async def admin_tts_order(payload: TtsMode):
+    value = payload.mode.strip().lower()
+    if value in ('voxcpm2', 'fireredtts3') and not eval_tts.enabled():
+        raise HTTPException(503, 'EVAL_TTS_API_KEY 尚未配置')
+    try:
+        tts_settings.set_mode(value)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from None
+    metrics_store.event('tts_mode_set')
+    return {'ok': True, 'mode': tts_settings.mode(), 'label': tts_settings.label(), 'order': tts_settings.order()}
 
 
 @app.get('/api/admin/sessions', dependencies=[Depends(require_admin)])
@@ -730,6 +782,10 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 footer{color:var(--dim);font-size:12px;line-height:1.8}
 button{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:7px;padding:7px 14px;cursor:pointer;font-size:12px}
 button:hover{border-color:var(--acc);color:var(--acc)}
+.tts-switch{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.tts-switch button.active{border-color:var(--acc);color:var(--acc);background:#eef5f0;font-weight:600}
+.tts-switch button:disabled{opacity:.5;cursor:not-allowed}
+.tts-switch .tts-current{color:var(--dim);font-size:12px}
 .error-banner{padding:10px 16px;min-width:0}
 .error-banner summary{display:flex;align-items:baseline;gap:12px;list-style:none;cursor:pointer}
 .error-banner summary::-webkit-details-marker{display:none}
@@ -778,6 +834,7 @@ details.session summary .s-meta{color:var(--dim);font-size:11px;white-space:nowr
   <details id="alert" class="card error-banner" aria-label="接口错误"><summary><strong>接口错误</strong><span class="error-preview" role="status">正在读取接口状态…</span></summary></details>
   <section class="cards" id="summary"></section>
   <section class="cards" id="status"></section>
+  <section class="card"><h2>声音合成</h2><div id="tts-switch" class="tts-switch"></div><p class="note">切换只影响之后的合成；进行中的讲述会等当前请求结束。参考音原文在讲述采样时保存，旧音色没有原文时会自动降级百炼。</p></section>
   <div class="grid3">
     <div class="card"><h2>请求</h2><div id="requests"></div></div>
     <div class="card"><h2>旅程阶段</h2><div id="events"></div></div>
@@ -799,7 +856,7 @@ const dot = ok => '<span class="dot ' + (ok ? 'ok' : 'bad') + '"></span>'
 const CHECK_LABELS = { frontend: '前端构建', api: '接口可用性', text: '文本模型', asr: '语音识别', tts: '声音合成', image: '插画服务', disk: '磁盘' }
 const TOPIC_LABELS = { future: '未来', product: '产品', idea: '想法', story: '故事' }
 let openSessions = new Set()
-const EVENT_LABELS = { compose_draft: '草稿上屏', compose_final: '审校完成', compose_review_fallback: '审校回退', compose_error: '整理失败', asr_session: '语音会话', illustrate: '插画请求', illustrate_error: '插画失败', tts_amphion_ok: '自建TTS成功', tts_amphion_fail: '自建TTS失败', tts_no_sample: '无参考音', tts_failover: '降级百炼', text_failover: '文本降级', tts_bailian_ok: '百炼成功', tts_bailian_fail: '百炼失败' }
+const EVENT_LABELS = { compose_draft: '草稿上屏', compose_final: '审校完成', compose_review_fallback: '审校回退', compose_error: '整理失败', asr_session: '语音会话', illustrate: '插画请求', illustrate_error: '插画失败', tts_amphion_ok: '自建TTS成功', tts_amphion_fail: '自建TTS失败', tts_voxcpm2_ok: 'VoxCPM2成功', tts_voxcpm2_fail: 'VoxCPM2失败', tts_fireredtts3_ok: 'FireRed成功', tts_fireredtts3_fail: 'FireRed失败', tts_no_sample: '无参考音', tts_failover: '降级百炼', text_failover: '文本降级', tts_bailian_ok: '百炼成功', tts_bailian_fail: '百炼失败', tts_mode_set: '切换TTS' }
 const LATENCY_LABELS = { compose_draft_seconds: '草稿时延', compose_final_seconds: '终版时延' }
 function detail(name, check) {
   if (name === 'text') {
@@ -810,9 +867,11 @@ function detail(name, check) {
   if (name === 'asr') return check.detail || ''
   if (name === 'api') return check.detail || (check.checked ? check.checked + ' 个接口' : '')
   if (name === 'tts') {
-    const parts = [check.provider || '']
+    const parts = [check.label || check.provider || '']
     if (check.amphion_ready) parts.push('自建就绪')
     else if ((check.provider || '').indexOf('amphion') >= 0) parts.push('自建不可用')
+    if (check.provider && check.provider.indexOf('voxcpm2') === 0) parts.push(check.eval_ready ? 'VoxCPM2 就绪' : 'VoxCPM2 未配置')
+    if (check.provider && check.provider.indexOf('fireredtts3') === 0) parts.push(check.eval_ready ? 'FireRed 就绪' : 'FireRed 未配置')
     if (check.cooldown) parts.push('冷却 ' + check.cooldown + 's')
     return parts.filter(Boolean).join(' · ')
   }
@@ -838,6 +897,33 @@ function renderErrorBar(messages) {
     (messages.length ? '<span class="error-more">详情（' + messages.length + '）</span>' : '') + '</summary>' +
     (messages.length ? '<ul>' + messages.map(message => '<li>' + esc(message) + '</li>').join('') + '</ul>' : '')
 }
+function renderTts(tts) {
+  const modes = tts.modes || []
+  const disabled = !tts.eval_configured
+  $('tts-switch').innerHTML = modes.map(item => {
+    const isEval = item.value === 'voxcpm2' || item.value === 'fireredtts3'
+    return '<button type="button" data-tts-mode="' + esc(item.value) + '"' +
+      (item.value === tts.mode ? ' class="active"' : '') +
+      (isEval && disabled ? ' disabled title="EVAL_TTS_API_KEY 未配置"' : '') +
+      '>' + esc(item.label) + '</button>'
+  }).join('') + '<span class="tts-current">当前：' + esc(tts.label || '-') + '</span>'
+  document.querySelectorAll('#tts-switch [data-tts-mode]').forEach(node => {
+    node.addEventListener('click', () => switchTts(node.dataset.ttsMode))
+  })
+}
+async function switchTts(mode) {
+  const response = await fetch('/api/admin/tts-order', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode }),
+  })
+  if (!response.ok) {
+    let detail = 'HTTP ' + response.status
+    try { const body = await response.json(); detail = body.detail || detail } catch (e) { /* keep status */ }
+    renderErrorBar(['切换 TTS 失败：' + detail])
+    return
+  }
+  await refresh()
+}
 function render(data) {
   const currentErrors = ['api', 'text', 'asr', 'tts', 'image'].flatMap(name => {
     const check = (data.checks || {})[name]
@@ -854,6 +940,7 @@ function render(data) {
   $('meta-version').textContent = 'v' + (data.version || '')
   $('meta-uptime').textContent = uptime(data.uptime_seconds)
   $('meta-updated').textContent = '更新于 ' + (data.processed_at || '')
+  renderTts(data.tts || {})
   const overall = data.status === 'ok'
   $('status').innerHTML = '<div class="card"><h2>服务</h2><div class="chip">' + dot(overall) + '<span>' + (overall ? '全部正常' : '有异常项') + '</span></div></div>' +
     Object.entries(data.checks || {}).map(([name, check]) =>

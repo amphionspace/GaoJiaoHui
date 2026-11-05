@@ -39,6 +39,7 @@ HOST=127.0.0.1 PORT=8766 .venv/bin/python -m server.main
 - 也可使用 `JOURNEY_LLM_URL`、`JOURNEY_LLM_MODEL`、`JOURNEY_LLM_API_KEY`，环境变量优先；模型配置每次请求读取。DeepSeek 余额不足/鉴权失败/超时且尚未出草稿时，自动降级到百炼 `qwen-plus`（`JOURNEY_LLM_FALLBACK_*` 可覆盖），看板记“文本降级”。
 - 百炼 TTS 使用根目录 `.env.bailian.json`，保存业务空间、北京地域地址和服务端 API Key，文件被 Git 忽略且应为权限 600。当前适配 `qwen-voice-enrollment` 创建临时音色，再用同一 `qwen3.5-omni-plus` 模型流式合成本人声音；密钥不会下发到浏览器。
 - `JOURNEY_TTS_PROVIDER=bailian` 启用百炼适配器，`JOURNEY_TTS_PROVIDER=legacy` 使用原有 `/v1/audio/voices` 网关协议。提供方只影响未来手记 TTS，不改变 ASR 与文本接口。
+- 后台看板“声音合成”可运行时切换：自研+百炼、百炼、VoxCPM2、FireRedTTS3。VoxCPM2 / FireRed 使用评测服务克隆接口；第一次讲述采样时会把当前讲述文本作为 `reference_text` 保存，旧音色缺少原文时自动降级百炼。切换只影响之后的合成，配置见 [TTS 试用选择](docs/TTS-OPTIONS.md)。
 - 语音 HTTP/WS 地址见 [运行配置示例](deploy/runtime.env.example)。前端启动时读取 `/api/config`，不需要为换网关重新构建。
 - Demo1 支持全界面英文体验：打开 `?lang=en`，或在页面右上角切换 `EN / 中`。竖屏英文地址为 `?view=portrait&lang=en`。
 - `JOURNEY_TTS_URL` 指向兼容当前临时音色协议的服务；**不能直接填任意商业厂商 URL**，注册、合成和认证协议需要适配。

@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 NAME = re.compile(r'journey_[a-f0-9]{32}\Z')
 MAX_BYTES = 2 * 1024 * 1024
+MAX_TEXT = 500
 
 
 def directory():
@@ -33,15 +34,25 @@ def max_files():
         return 40
 
 
-def save(voice, raw):
+def save(voice, raw, reference_text=''):
     if not NAME.fullmatch(voice or '') or not raw or len(raw) > MAX_BYTES:
         return False
     folder = directory()
     path = folder / f'{voice}.wav'
+    text_path = folder / f'{voice}.txt'
     try:
         folder.mkdir(mode=0o700, parents=True, exist_ok=True)
         path.write_bytes(raw)
         path.chmod(0o600)
+        text = str(reference_text or '').strip()[:MAX_TEXT]
+        if text:
+            text_path.write_text(text + '\n', encoding='utf-8')
+            text_path.chmod(0o600)
+        else:
+            try:
+                text_path.unlink()
+            except OSError:
+                pass
     except OSError:
         return False
     prune()
@@ -60,13 +71,31 @@ def load(voice):
     return None
 
 
+def load_text(voice):
+    if not NAME.fullmatch(voice or ''):
+        return None
+    folder = directory()
+    path = folder / f'{voice}.wav'
+    text_path = folder / f'{voice}.txt'
+    try:
+        if not path.is_file() or time.time() - path.stat().st_mtime > ttl_seconds():
+            return None
+        if text_path.is_file():
+            return text_path.read_text(encoding='utf-8').strip()[:MAX_TEXT] or None
+    except OSError:
+        return None
+    return None
+
+
 def delete(voice):
     if not NAME.fullmatch(voice or ''):
         return
-    try:
-        (directory() / f'{voice}.wav').unlink()
-    except OSError:
-        pass
+    folder = directory()
+    for suffix in ('.wav', '.txt'):
+        try:
+            (folder / f'{voice}{suffix}').unlink()
+        except OSError:
+            pass
 
 
 def prune():
@@ -82,5 +111,15 @@ def prune():
         try:
             if index >= max_files() or now - path.stat().st_mtime > ttl_seconds():
                 path.unlink()
+                try:
+                    path.with_suffix('.txt').unlink()
+                except OSError:
+                    pass
         except OSError:
             continue
+    for text_path in folder.glob('*.txt'):
+        if not text_path.with_suffix('.wav').exists():
+            try:
+                text_path.unlink()
+            except OSError:
+                pass

@@ -10,6 +10,11 @@ import time
 
 import httpx
 
+try:
+    from . import tts_settings
+except ImportError:
+    import tts_settings
+
 DEFAULT_URL = 'https://test-playground.amphion.top'
 READY_CACHE_SECONDS = 20
 _ready = {'at': 0.0, 'ok': False, 'model': '', 'latency_ms': 0}
@@ -25,9 +30,7 @@ def base_url():
 
 
 def order():
-    raw = os.environ.get('JOURNEY_TTS_ORDER', 'bailian')
-    items = [item.strip().lower() for item in raw.split(',') if item.strip().lower() in ('amphion', 'bailian')]
-    return items or ['bailian']
+    return tts_settings.order()
 
 
 def enabled():

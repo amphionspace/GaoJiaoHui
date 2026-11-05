@@ -46,3 +46,35 @@ JOURNEY_TTS_SAMPLE_MAX=40             # 参考音缓存条数
 - `/api/health` 的 `checks.tts` 返回 `provider`（如 `amphion → bailian`）、`amphion_ready`、`amphion_ms`、`cooldown`；`/tts-api/ready` 的结果缓存 20 秒。
 - 服务日志会打印 `amphion tts failed: <类型或状态码>`，不包含朗读文本。
 - 文本侧同时清理“AI 合成 / 情景演示 / 虚构台词 / 仅供演示”等说明性话术，避免被 TTS 读出来。
+
+
+## 运行时切换与 VoxCPM2 / FireRedTTS3（2026-11-05）
+
+后台 `/admin` 的“声音合成”新增运行时切换：
+
+- 自研 TTS + 百炼
+- 百炼 Qwen
+- VoxCPM2 + 百炼
+- FireRedTTS3 + 百炼
+
+选择保存在 `.journey-state/tts-settings.json`（0600），重启后保留，切换只影响之后的合成。注意：当前 `.journey-state` 在生产是跨 release 的 symlink，回滚 release 不会丢选择。
+
+VoxCPM2 / FireRed 使用 `https://speeker.amphiondev.com/tts-eval/speech/{model}` 的 `mode=clone`：
+
+- 参考音：6–15 秒（采样器实际会截到约 10–15 秒）
+- `reference_text`：讲述采样时前端把当前讲述文本一起上传，服务端保存在 `.journey-state/tts/<voice>.txt`
+- FireRed 发送 `language=Chinese` / `English`
+- 429 自动重试，仍失败或缺少参考原文时降级百炼
+- 每个模型同时只处理一个请求，展台不要并发多个讲述
+
+配置：
+
+```ini
+EVAL_TTS_API_KEY=...
+EVAL_TTS_BASE_URL=https://speeker.amphiondev.com
+EVAL_TTS_TIMEOUT=180
+EVAL_TTS_RETRIES=2
+EVAL_TTS_LANGUAGE=Chinese
+```
+
+FireRed 项目说明中音色克隆仅限学术研究用途；正式对外使用前需确认授权。ElevenLabs 未接入 GaoJiaoHui：当前账号是免费套餐，`can_use_instant_voice_cloning=false`，服务端会拒绝克隆。
