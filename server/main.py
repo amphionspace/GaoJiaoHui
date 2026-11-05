@@ -226,7 +226,9 @@ INTERFACE_PATHS = {
     'image': '/api/journey/illustrate',
 }
 HEALTH_RECORD_COOLDOWN = 900
+HEALTH_PERSIST_SECONDS = 100
 _health_recorded = {}
+_health_since = {}
 
 
 async def api_check():
@@ -250,25 +252,37 @@ async def api_check():
 
 
 def record_health_failures(checks):
-    """Copy failed probes into the interface error list so banner and alerts agree."""
+    """Copy sustained probe failures into the interface error list.
+
+    A single failed sample is ignored: one DNS blip used to leave an entry in
+    the dashboard while the group (which needs two strikes) stayed quiet. A
+    check now has to stay down for HEALTH_PERSIST_SECONDS before it is stored.
+    """
     now = time.time()
     for name, check in checks.items():
         if check.get('ok') is not False:
+            _health_since.pop(name, None)
             _health_recorded.pop(name, None)
             if name == 'api':
+                for key in [key for key in _health_since if key.startswith('api:')]:
+                    del _health_since[key]
                 for key in [key for key in _health_recorded if key.startswith('api:')]:
                     del _health_recorded[key]
             continue
         if name == 'api':
             for path in check.get('failed') or []:
                 key = 'api:' + path
+                if now - _health_since.setdefault(key, now) < HEALTH_PERSIST_SECONDS:
+                    continue
                 if now - _health_recorded.get(key, 0) < HEALTH_RECORD_COOLDOWN:
                     continue
                 _health_recorded[key] = now
                 metrics_store.error(path, 503, 'api_unavailable')
             continue
         path = INTERFACE_PATHS.get(name)
-        if not path or now - _health_recorded.get(name, 0) < HEALTH_RECORD_COOLDOWN:
+        if not path or now - _health_since.setdefault(name, now) < HEALTH_PERSIST_SECONDS:
+            continue
+        if now - _health_recorded.get(name, 0) < HEALTH_RECORD_COOLDOWN:
             continue
         _health_recorded[name] = now
         metrics_store.error(path, 503, 'health_' + name)

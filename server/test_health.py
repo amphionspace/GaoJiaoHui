@@ -17,6 +17,7 @@ def basic():
 class InterfaceProbeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         main._health_recorded.clear()
+        main._health_since.clear()
         main.metrics_store.errors.clear()
 
     async def test_probe_reports_healthy_routes(self):
@@ -38,18 +39,29 @@ class InterfaceProbeTests(unittest.IsolatedAsyncioTestCase):
     def test_failed_probe_is_recorded_once_and_rearms_after_recovery(self):
         failing = {'api': {'ok': False, 'checked': 7, 'failed': ['/api/journey/compose'],
                            'detail': '/api/journey/compose HTTP 500'}}
-        main.record_health_failures(failing)
-        main.record_health_failures(failing)
-        errors = [item for item in main.metrics_store.recent_errors(900) if item['code'] == 'api_unavailable']
-        self.assertEqual(len(errors), 1)
-        self.assertEqual(errors[0]['path'], '/api/journey/compose')
-        main.record_health_failures({'api': {'ok': True, 'failed': [], 'detail': '接口可用'}})
-        main.record_health_failures(failing)
-        self.assertEqual(len([item for item in main.metrics_store.recent_errors(900)
-                              if item['code'] == 'api_unavailable']), 2)
+        with patch.object(main, 'HEALTH_PERSIST_SECONDS', 0):
+            main.record_health_failures(failing)
+            main.record_health_failures(failing)
+            errors = [item for item in main.metrics_store.recent_errors(900) if item['code'] == 'api_unavailable']
+            self.assertEqual(len(errors), 1)
+            self.assertEqual(errors[0]['path'], '/api/journey/compose')
+            main.record_health_failures({'api': {'ok': True, 'failed': [], 'detail': '接口可用'}})
+            main.record_health_failures(failing)
+            self.assertEqual(len([item for item in main.metrics_store.recent_errors(900)
+                                  if item['code'] == 'api_unavailable']), 2)
 
-    def test_other_checks_are_recorded_against_their_interface(self):
-        main.record_health_failures({'text': {'ok': False, 'model': '', 'fallback': ''}})
+    def test_a_single_failed_sample_never_reaches_the_dashboard(self):
+        failing = {'text': {'ok': False, 'model': '', 'fallback': ''}}
+        main.record_health_failures(failing)
+        self.assertEqual(main.metrics_store.recent_errors(900), [])
+        main.record_health_failures({'text': {'ok': True, 'model': 'deepseek-chat', 'fallback': ''}})
+        self.assertEqual(main.metrics_store.recent_errors(900), [])
+        self.assertEqual(main._health_since, {})
+
+    def test_a_sustained_failure_is_recorded_after_the_persist_window(self):
+        failing = {'text': {'ok': False, 'model': '', 'fallback': ''}}
+        main._health_since['text'] = main.time.time() - 200
+        main.record_health_failures(failing)
         errors = main.metrics_store.recent_errors(900)
         self.assertEqual(errors[0]['path'], '/api/journey/compose/stream')
         self.assertEqual(errors[0]['code'], 'health_text')
@@ -57,7 +69,8 @@ class InterfaceProbeTests(unittest.IsolatedAsyncioTestCase):
     async def test_probe_failure_reaches_the_admin_interface_errors(self):
         failing = {'ok': False, 'checked': 7, 'failed': ['/api/journey/illustrate'],
                    'detail': '/api/journey/illustrate HTTP 503'}
-        with patch.object(main, 'api_check', return_value=failing), patch.dict('os.environ', ADMIN_ENV):
+        with patch.object(main, 'api_check', return_value=failing), \
+             patch.object(main, 'HEALTH_PERSIST_SECONDS', 0), patch.dict('os.environ', ADMIN_ENV):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app),
                                          base_url='http://127.0.0.1:8766') as api:
                 health = await api.get('/api/health')
