@@ -61,7 +61,7 @@ const EN = {
   '接口三（A）声纹注册与音色克隆': 'Endpoint 3A · Voiceprint enrollment and cloning', '接口三（B）克隆合成': 'Endpoint 3B · Cloned-voice synthesis',
   '合成并播放': 'Synthesize and play', '删除选中': 'Delete selected', '点击刷新音色列表': 'Click to refresh voice list',
   '本页可留空': 'Optional on this page', '本机记住连接': 'Remember connection on this device', '清除': 'Clear',
-  '注册后即成可复刻音色': 'Ready to clone after registration', '音色配额': 'Voice quota', '删除选中': 'Delete selected', '本地 Qwen3-TTS-1.7B': 'Local Qwen3-TTS-1.7B', '火山 seed-iclv2': 'Volcengine seed-iclv2',
+  '注册后即成可复刻音色': 'Ready to clone after registration', '音色配额': 'Voice quota', '删除选中': 'Delete selected', '本地 TTS 1.7B': 'Local TTS 1.7B', '声音克隆服务': 'Voice cloning service',
   '播放该录音': 'Play this recording', '停止播放': 'Stop playback', '删除该录音': 'Delete this recording',
   '全屏体验': 'Fullscreen', '链接已复制': 'Link copied', '复制体验链接': 'Copy experience link', '返回普通页面': 'Back to standard view',
   '切换语言': 'Switch language', '和 2036 对话竖屏体验': 'Conversation with 2036 portrait experience',

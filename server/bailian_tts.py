@@ -64,7 +64,7 @@ def configuration() -> dict[str, str]:
                 raise ValueError()
             values = loaded
         except (OSError, ValueError):
-            raise HTTPException(503, "百炼 TTS 配置文件无法读取，请检查 .env.bailian.json。") from None
+            raise HTTPException(503, "语音服务配置文件无法读取，请检查 .env.bailian.json。") from None
     config = {
         "api_key": str(os.environ.get("BAILIAN_API_KEY", values.get("api_key", ""))).strip(),
         "base_url": str(os.environ.get("BAILIAN_BASE_URL", values.get("base_url", ""))).strip().rstrip("/"),
@@ -76,7 +76,7 @@ def configuration() -> dict[str, str]:
         )).strip(),
     }
     if not config["api_key"] or not config["base_url"] or not config["compatible_base_url"]:
-        raise HTTPException(503, "百炼 TTS 尚未配置完整，请检查服务端敏感配置。")
+        raise HTTPException(503, "语音服务尚未配置完整，请检查服务端敏感配置。")
     return config
 
 
@@ -99,22 +99,22 @@ def _safe_upstream_error(response: httpx.Response, config: dict[str, str], opera
     message = message.replace(config["api_key"], "[redacted]").replace("\n", " ").strip()[:180]
     suffix = f"：{message}" if message else ""
     status = 502 if response.status_code >= 500 else response.status_code
-    return HTTPException(status, f"百炼{operation}失败（HTTP {response.status_code}）{suffix}")
+    return HTTPException(status, f"语音服务{operation}失败（HTTP {response.status_code}）{suffix}")
 
 
 async def _post_json(client: httpx.AsyncClient, url: str, config: dict[str, str], payload: dict, operation: str):
     try:
         response = await client.post(url, headers=_headers(config), json=payload)
     except httpx.TimeoutException:
-        raise HTTPException(504, f"百炼{operation}超时，请稍后重试。") from None
+        raise HTTPException(504, f"语音服务{operation}超时，请稍后重试。") from None
     except httpx.RequestError:
-        raise HTTPException(502, f"无法连接百炼{operation}服务，请稍后重试。") from None
+        raise HTTPException(502, f"无法连接语音服务{operation}，请稍后重试。") from None
     if response.status_code >= 400:
         raise _safe_upstream_error(response, config, operation)
     try:
         return response.json()
     except ValueError:
-        raise HTTPException(502, f"百炼{operation}返回了无法识别的结果。") from None
+        raise HTTPException(502, f"语音服务{operation}返回了无法识别的结果。") from None
 
 
 async def require_client_key(request: Request) -> str:
@@ -184,7 +184,7 @@ async def create_voice(request: Request, voice_name: str, audio_file: UploadFile
     )
     voice = ((result.get("output") or {}).get("voice") if isinstance(result, dict) else "")
     if not voice:
-        raise HTTPException(502, "百炼声音复刻完成但没有返回音色编号。")
+        raise HTTPException(502, "语音克隆完成但没有返回音色编号。")
     with _database() as db:
         db.execute('INSERT INTO voices (owner, name, remote, model) VALUES (?, ?, ?, ?)',
                    (_owner(key), voice_name, voice, config['target_model']))
@@ -281,7 +281,7 @@ async def synthesize(request: Request, body=None, key=None):
                 except ValueError:
                     continue
                 if event.get('code'):
-                    raise HTTPException(502, '百炼声音合成未完成，请稍后重试。')
+                    raise HTTPException(502, '语音合成未完成，请稍后重试。')
                 for choice in event.get("choices", []):
                     audio = ((choice.get("delta") or {}).get("audio") or {})
                     if isinstance(audio, dict):
@@ -289,9 +289,9 @@ async def synthesize(request: Request, body=None, key=None):
     except HTTPException:
         raise
     except httpx.TimeoutException:
-        raise HTTPException(504, "百炼声音合成超时，请稍后重试。") from None
+        raise HTTPException(504, "语音合成超时，请稍后重试。") from None
     except httpx.RequestError:
-        raise HTTPException(502, "无法连接百炼声音合成服务，请稍后重试。") from None
+        raise HTTPException(502, "无法连接语音合成服务，请稍后重试。") from None
     if audio_b64.startswith("data:") and "," in audio_b64:
         audio_b64 = audio_b64.split(",", 1)[1]
     try:
@@ -299,7 +299,7 @@ async def synthesize(request: Request, body=None, key=None):
     except (binascii.Error, ValueError):
         raw = b""
     if not raw:
-        raise HTTPException(502, "百炼没有返回可播放的声音。")
+        raise HTTPException(502, "语音服务没有返回可播放的声音。")
     if raw.startswith(b"RIFF"):
         wav = raw
     else:

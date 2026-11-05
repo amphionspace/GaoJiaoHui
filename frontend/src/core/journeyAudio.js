@@ -485,7 +485,7 @@ export function voiceFailureMessage(error) {
   }
   if (/Selected voice model backend .* is unavailable/i.test(message)) return `${step}：本人音色模型服务暂未运行，请工作人员恢复 TTS 服务后重试。`
   if (/CERTIFICATE_VERIFY_FAILED|certificate verify failed/i.test(message)) return `${step}：语音网关的证书连接失败，请工作人员检查代理配置。`
-  if ([401, 403].includes(error?.status) && /百炼/.test(message)) return `${step}：${message}。请检查百炼密钥的音色注册及语音合成权限。`
+  if ([401, 403].includes(error?.status)) return `${step}：${message}。请检查语音服务的音色注册及语音合成权限。`
   if ([401, 403].includes(error?.status)) return `${step}：语音网关密钥无效或权限不足，请工作人员检查设置。`
   if (/timeout/i.test(error?.name) || /timed? ?out|超时/i.test(message)) return `${step}：语音服务响应超时，可以重试。`
   return `${step}：${message || '语音服务暂时不可用，请稍后重试。'}`

@@ -558,7 +558,7 @@ async def synthesize_journey_speech(request, body):
 
     if "bailian" not in order:
         if order and order[0] in eval_tts.MODELS:
-            raise HTTPException(502, "本人音色缺少参考原文，无法使用克隆合成；请重新讲述或切换百炼。")
+            raise HTTPException(502, "本人音色缺少参考原文，无法使用克隆合成；请重新讲述或切换备用语音。")
         raise HTTPException(502, "自建语音合成暂时不可用，请稍后重试。")
     metrics_store.event("tts_failover")
     try:

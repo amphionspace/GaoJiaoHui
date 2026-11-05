@@ -1,7 +1,7 @@
 <script setup>
 /* 接口三：声纹注册（A）+ 克隆合成（B）
-   A: 录 2-15s 参考音频/选文件 -> multipart POST /tts/v1/audio/voices（火山 Seed-ICL 2.0，配额 10）
-   B: 合成后端可选 —— qwen-tts-1.7b（本地 vLLM，model 名直通路由，~1s）/ seed-iclv2（火山） */
+   A: 录 2-15s 参考音频/选文件 -> multipart POST /tts/v1/audio/voices（声音克隆服务，配额 10）
+   B: 合成后端可选 —— 本地 TTS 1.7B（~1s）/ 声音克隆服务 */
 import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { api } from '../core/api.js'
 import { store, log } from '../core/store.js'
@@ -132,7 +132,7 @@ defineExpose({ listVoices })
     <div class="card">
       <h2>接口三（A）声纹注册与音色克隆
         <span class="tag">POST /tts/v1/audio/voices</span><span class="tag">multipart</span></h2>
-      <div class="desc">录制 2–15 秒参考音频（或选本地音频文件），注册后即成可复刻音色（火山 Seed-ICL 2.0）。
+      <div class="desc">录制 2–15 秒参考音频（或选本地音频文件），注册后即成可复刻音色。
         注意：每账号音色配额 10 个，配额已满请先删除。</div>
       <div class="row">
         <button class="act" @click="toggleRec()">{{ recBtn }}</button>
@@ -157,8 +157,8 @@ defineExpose({ listVoices })
           <option v-for="v in voices" :key="v" :value="v">{{ v }}</option>
         </select>
         <select v-model="ttsModel" style="width:170px" title="合成后端">
-          <option value="qwen-tts-1.7b">本地 Qwen3-TTS-1.7B</option>
-          <option value="seed-iclv2">火山 seed-iclv2</option>
+          <option value="qwen-tts-1.7b">本地 TTS 1.7B</option>
+          <option value="seed-iclv2">声音克隆服务</option>
         </select>
         <button class="mini" @click="listVoices()">刷新</button>
         <button class="mini" @click="delVoice()">删除选中</button>
