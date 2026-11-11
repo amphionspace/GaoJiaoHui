@@ -537,6 +537,89 @@ test('closing print preview does not claim paper was delivered or reopen the mic
   app.unmount()
 })
 
+test('printing waits for the illustration, hand font, and final font layout', async () => {
+  const image = deferred(), font = deferred(), layout = deferred()
+  const { state, document, window, app } = await mount('BoothJourney')
+  const fontRequests = []
+  document.querySelectorAll = () => [{ decode: () => image.promise }]
+  document.fonts = {
+    load: (description, text) => { fontRequests.push({ description, text }); return font.promise },
+    ready: layout.promise,
+  }
+  let prints = 0
+  window.print = () => { prints++ }
+  state.journal = { summary: '手记摘要', noteText: '愿十年后仍有时间陪家人散步。' }
+  const printing = state.printJournal()
+  await tick()
+  assert.equal(prints, 0)
+  image.resolve(); await tick()
+  assert.equal(fontRequests.length, 1)
+  assert.match(fontRequests[0].description, /Receipt Hand/)
+  assert.equal(fontRequests[0].text, state.journal.noteText)
+  font.resolve(); await tick()
+  assert.equal(prints, 0)
+  layout.resolve(); await printing
+  assert.equal(prints, 1)
+  app.unmount()
+})
+
+test('a failed hand font keeps the journal available for another print attempt', async () => {
+  const { state, document, window, app } = await mount('BoothJourney')
+  document.fonts = { load: async () => { throw new Error('font unavailable') }, ready: Promise.resolve() }
+  let prints = 0
+  window.print = () => { prints++ }
+  state.journal = { summary: '愿十年后仍有时间陪家人散步。' }
+  await state.printJournal()
+  assert.equal(prints, 0)
+  assert.equal(state.stage, 'preview')
+  assert.match(state.error, /字体/)
+  assert.equal(state.journal.summary, '愿十年后仍有时间陪家人散步。')
+  app.unmount()
+})
+
+for (const cancellation of ['reset', 'leave']) {
+  test(`a font arriving after ${cancellation} cannot open the old print dialog`, async () => {
+    const font = deferred()
+    const { state, document, window, active, recorders, app } = await mount('BoothJourney')
+    document.fonts = { load: () => font.promise, ready: Promise.resolve() }
+    let prints = 0
+    window.print = () => { prints++ }
+    state.journal = { summary: '愿十年后仍有时间陪家人散步。' }
+    const printing = state.printJournal()
+    await tick()
+    assert.equal(state.stage, 'printing')
+    if (cancellation === 'reset') state.reset()
+    else { active.value = false; await Vue.nextTick() }
+    font.resolve(); await printing
+    assert.equal(prints, 0)
+    assert.equal(state.stage, cancellation === 'reset' ? 'welcome' : 'preview')
+    assert.equal(recorders.length, 0)
+    app.unmount()
+  })
+}
+
+for (const resource of ['font', 'image']) {
+  test(`${resource} failure after returning home cannot restore the old print preview`, async () => {
+    const loading = deferred()
+    const { state, document, window, app } = await mount('BoothJourney')
+    const failure = async () => { await loading.promise; throw new Error(`late ${resource} failure`) }
+    if (resource === 'font') document.fonts = { load: failure, ready: Promise.resolve() }
+    else document.querySelectorAll = () => [{ decode: failure }]
+    let prints = 0
+    window.print = () => { prints++ }
+    state.journal = { summary: '愿十年后仍有时间陪家人散步。' }
+    const printing = state.printJournal()
+    await tick()
+    state.reset()
+    loading.resolve(); await printing
+    assert.equal(prints, 0)
+    assert.equal(state.stage, 'welcome')
+    assert.equal(state.journal, null)
+    assert.equal(state.error, '')
+    app.unmount()
+  })
+}
+
 
 test('light call UI derives states from real recorder events and leaves cloning off by default', async () => {
   const { state, app, recorders } = await mount('BoothJourney')

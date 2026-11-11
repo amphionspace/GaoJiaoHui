@@ -372,12 +372,25 @@ async function togglePlayback() {
 }
 async function printJournal() {
   if (!journal.value?.summary || stage.value === 'printing' || imageBusy.value || notePending.value) return
-  const id = session
+  const id = session, printText = journal.value.noteText || journal.value.summary
   stopPlayback(); stopRecording(); stage.value = 'printing'; printReturned.value = false
   await nextTick()
   try {
     for (const img of document.querySelectorAll?.('#journey-print-root img') || []) await img.decode()
-  } catch { error.value = '插画尚未加载完成，请重试打印。'; stage.value = 'preview'; return }
+  } catch {
+    if (id === session && stage.value === 'printing') { error.value = '插画尚未加载完成，请重试打印。'; stage.value = 'preview' }
+    return
+  }
+  if (id !== session || stage.value !== 'printing') return
+  try {
+    if (document.fonts) {
+      await document.fonts.load('400 8pt "Receipt Hand"', printText)
+      await document.fonts.ready
+    }
+  } catch {
+    if (id === session && stage.value === 'printing') { error.value = '手绘字体尚未加载完成，请重试打印。'; stage.value = 'preview' }
+    return
+  }
   if (id === session && stage.value === 'printing') window.print()
 }
 function afterPrint() {
