@@ -61,15 +61,15 @@ JOURNEY_ADMIN_PASSWORD=<长随机密码>
 ```ini
 JOURNEY_SESSION_LOG=1                 # 1 开启会话记录；0 完全关闭
 JOURNEY_SESSION_TRANSCRIPT=1          # 1 保存讲述原文；0 只保存手记/回信，不存原文
-JOURNEY_SESSION_RETENTION_DAYS=7      # 1-90 天，插入时自动清理过期记录
-JOURNEY_SESSION_MAX=500               # 最多保留条数
+JOURNEY_SESSION_RETENTION_DAYS=7      # 1-36500 天；0 = 不按天清理（展期用）
+JOURNEY_SESSION_MAX=500               # 最多保留条数；0 = 不限制
 JOURNEY_SESSION_AUDIO=1               # 1 保存访客录音、参考音与回信语音
-JOURNEY_SESSION_AUDIO_MAX=120         # 最多保留多少条带音频的会话
+JOURNEY_SESSION_AUDIO_MAX=120         # 最多保留多少条带音频的会话；0 = 不删除音频
 ```
 
 - 存储：会话在 `/.journey-state/sessions.sqlite3`，音频在 `/.journey-state/audio/`（与音色状态同目录，权限 600）。音频包含三类：访客完整录音（最多 120 秒）、注册音色用的 5–30 秒参考音、生成的回信语音。
 - 一条记录包含：访客编号（用户1、用户2…）、时间、主题、讲述原文（可关闭）、手记、回信、关键词、模型、草稿/终版耗时、是否完成审校、是否打印。
-- 展开一条记录可以播放“访客录音”“访客参考音”和“回信语音”；音频按 `JOURNEY_SESSION_AUDIO_MAX` 保留最近的若干条，超出后自动删除最旧的文件。
+- 展开一条记录可以播放“访客录音”“访客参考音”和“回信语音”；音频按 `JOURNEY_SESSION_AUDIO_MAX` 保留最近的若干条，超出后自动删除最旧的文件。任一上限设为 `0` 表示关闭对应清理（当前线上就是全 `0`，活动期间不自动删除，需要手动“清空”）。
 - 看板里点击任意一条可展开原文、手记、回信与音频；“清空”按钮会删除全部会话记录和音频文件，删除前有确认。
 - 记录只通过 `/api/admin/sessions` 暴露，需要后台 Basic 认证；服务端写入失败不会影响访客拿到手记。
 - 隐私建议：展期结束或移交设备前，用“清空”按钮删除记录与音频；不需要复盘时把 `JOURNEY_SESSION_LOG=0` 并重启。访客录音、参考音与回信语音都可用于识别说话人，按与讲述同等级别保管；首页隐私说明会在开启会话记录时提示保留期。

@@ -1,7 +1,8 @@
 """Optional per-session records for the ops dashboard.
 
 Off by default. With JOURNEY_SESSION_LOG=1 each visit is stored in
-.journey-state/sessions.sqlite3 for JOURNEY_SESSION_RETENTION_DAYS days:
+.journey-state/sessions.sqlite3 for JOURNEY_SESSION_RETENTION_DAYS days
+(0 disables the age, row and audio caps for an exhibition):
 transcript (unless JOURNEY_SESSION_TRANSCRIPT=0), note, reply, keywords,
 timings and print state. With JOURNEY_SESSION_AUDIO=1 the uploaded reference
 sample and the generated reply WAV are kept under .journey-state/audio for
@@ -35,22 +36,23 @@ def audio_enabled():
 
 
 def retention_days():
+    """0 keeps every row; the exhibition uses this so audio survives the event."""
     try:
-        return max(1, min(90, int(os.environ.get('JOURNEY_SESSION_RETENTION_DAYS', '7'))))
+        return max(0, min(36500, int(os.environ.get('JOURNEY_SESSION_RETENTION_DAYS', '7'))))
     except ValueError:
         return 7
 
 
 def max_rows():
     try:
-        return max(20, min(5000, int(os.environ.get('JOURNEY_SESSION_MAX', '500'))))
+        return max(0, min(1000000, int(os.environ.get('JOURNEY_SESSION_MAX', '500'))))
     except ValueError:
         return 500
 
 
 def max_audio():
     try:
-        return max(10, min(500, int(os.environ.get('JOURNEY_SESSION_AUDIO_MAX', '120'))))
+        return max(0, min(1000000, int(os.environ.get('JOURNEY_SESSION_AUDIO_MAX', '120'))))
     except ValueError:
         return 120
 
@@ -141,14 +143,18 @@ def _visitor(connection, session_id):
 
 
 def _prune(connection):
-    connection.execute(
-        "DELETE FROM sessions WHERE created_at < datetime('now', 'localtime', ?)",
-        ('-' + str(retention_days()) + ' days',),
-    )
-    connection.execute(
-        'DELETE FROM sessions WHERE id NOT IN (SELECT id FROM sessions ORDER BY created_at DESC LIMIT ?)',
-        (max_rows(),),
-    )
+    days = retention_days()
+    if days:
+        connection.execute(
+            "DELETE FROM sessions WHERE created_at < datetime('now', 'localtime', ?)",
+            ('-' + str(days) + ' days',),
+        )
+    rows = max_rows()
+    if rows:
+        connection.execute(
+            'DELETE FROM sessions WHERE id NOT IN (SELECT id FROM sessions ORDER BY created_at DESC LIMIT ?)',
+            (rows,),
+        )
     _orphan_audio(connection)
 
 
@@ -173,9 +179,12 @@ def _delete_audio_files(session_id):
 
 
 def _trim_audio(connection):
+    limit = max_audio()
+    if not limit:
+        return
     rows = connection.execute(
         'SELECT id FROM sessions WHERE sample_audio IS NOT NULL OR reply_audio IS NOT NULL '
-        'OR visit_audio IS NOT NULL ORDER BY created_at DESC LIMIT -1 OFFSET ?', (max_audio(),)
+        'OR visit_audio IS NOT NULL ORDER BY created_at DESC LIMIT -1 OFFSET ?', (limit,)
     ).fetchall()
     for row in rows:
         _delete_audio_files(row['id'])

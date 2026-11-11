@@ -60,6 +60,17 @@ class SessionStoreTests(unittest.TestCase):
             rows = sessions.recent()
             self.assertEqual([row['id'] for row in rows], ['new'])
 
+    def test_zero_disables_the_age_and_row_caps(self):
+        env = {**self.env, 'JOURNEY_SESSION_RETENTION_DAYS': '0', 'JOURNEY_SESSION_MAX': '0'}
+        with patch.dict('os.environ', env):
+            self.assertEqual(sessions.retention_days(), 0)
+            self.assertEqual(sessions.max_rows(), 0)
+            sessions.record_draft('old', REQUEST, NOTE, 900, 'deepseek-chat')
+            with sqlite3.connect(self.db) as connection:
+                connection.execute("UPDATE sessions SET created_at = datetime('now', 'localtime', '-40 days')")
+            sessions.record_draft('new', REQUEST, NOTE, 900, 'deepseek-chat')
+            self.assertEqual(sorted(row['id'] for row in sessions.recent()), ['new', 'old'])
+
     def test_clear_removes_every_row(self):
         with patch.dict('os.environ', self.env):
             sessions.record_draft('one', REQUEST, NOTE, 900, 'deepseek-chat')
@@ -132,6 +143,26 @@ class SessionFeatureTests(unittest.TestCase):
             sessions.clear()
             self.assertFalse(Path(path).exists())
             self.assertEqual(sessions.summary()['total'], 0)
+
+    def test_zero_audio_limit_keeps_every_recording(self):
+        import io
+        import wave
+
+        buffer = io.BytesIO()
+        with wave.open(buffer, 'wb') as sample:
+            sample.setnchannels(1)
+            sample.setsampwidth(2)
+            sample.setframerate(24000)
+            sample.writeframes(b'\x00\x00' * 24000)
+        raw = buffer.getvalue()
+        env = {**self.env, 'JOURNEY_SESSION_AUDIO_MAX': '0'}
+        with patch.dict('os.environ', env):
+            for name in ('a' * 32, 'b' * 32, 'c' * 32):
+                sessions.record_draft(name, REQUEST, NOTE, 100, 'model')
+                sessions.save_audio(name, 'reply', raw)
+            self.assertEqual(sessions.max_audio(), 0)
+            for name in ('a' * 32, 'b' * 32, 'c' * 32):
+                self.assertTrue(sessions.audio_path(name, 'reply'))
 
     def test_audio_path_rejects_unknown_kind_and_id(self):
         with patch.dict('os.environ', self.env):
