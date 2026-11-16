@@ -167,7 +167,7 @@ def configuration():
         except (OSError, ValueError):
             raise HTTPException(503, detail={"code": "text_config_invalid", "message": "文本服务配置文件无法读取，请检查 .env.journey.json。"})
     config = {name: str(os.environ.get("JOURNEY_LLM_" + name.upper(), values.get(name, ""))).strip()
-              for name in ("url", "model", "api_key")}
+              for name in ("url", "model", "api_key", "reasoning_effort")}
     if config["url"]:
         try:
             url = httpx.URL(config["url"])
@@ -355,6 +355,10 @@ async def _compose_with(config, request, session_id, started, deadline):
             {"topic": TOPICS_EN[request.topic], "transcript": request.transcript} if english else
             {"主题": TOPICS[request.topic], "完整讲述": request.transcript}, ensure_ascii=False)},
     ]
+    # Reasoning models spend the whole budget thinking before writing the JSON;
+    # setting reasoning_effort to "none" keeps the note fast on providers that
+    # expose the switch.
+    effort = {"reasoning_effort": config["reasoning_effort"]} if config.get("reasoning_effort") else {}
     local_model = httpx.URL(config["url"]).host in ("127.0.0.1", "localhost", "::1")
     async with httpx.AsyncClient(timeout=40, trust_env=not local_model) as client:
         async def post(payload):
@@ -370,7 +374,7 @@ async def _compose_with(config, request, session_id, started, deadline):
         for attempt in range(2):
             response = await post({
                 "model": config["model"], "messages": messages,
-                "temperature": 0.65, "max_tokens": MAX_COMPLETION_TOKENS,
+                "temperature": 0.65, "max_tokens": MAX_COMPLETION_TOKENS, **effort,
             })
             if response.status_code >= 400:
                 status = response.status_code
@@ -391,7 +395,7 @@ async def _compose_with(config, request, session_id, started, deadline):
                 yield "draft", note
                 # A separate editorial pass checks meaning, which length/anchor checks cannot establish.
                 reviewed = await post({
-                    "model": config["model"], "temperature": 0.2, "max_tokens": MAX_COMPLETION_TOKENS,
+                    "model": config["model"], "temperature": 0.2, "max_tokens": MAX_COMPLETION_TOKENS, **effort,
                     "messages": messages[:2] + [
                         {"role": "assistant", "content": note.model_dump_json()},
                         {"role": "user", "content": REVIEW_PROMPT_EN if english else REVIEW_PROMPT},

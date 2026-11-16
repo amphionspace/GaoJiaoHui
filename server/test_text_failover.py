@@ -51,6 +51,36 @@ class TextFailoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, ['primary.test', 'fallback.test', 'fallback.test'])
         self.assertEqual(journey_text.metrics.events.get('text_failover', 0), before + 1)
 
+    async def test_reasoning_effort_is_forwarded_only_when_configured(self):
+        payloads = []
+
+        def handler(request):
+            payloads.append(json.loads(request.content))
+            return httpx.Response(200, json=reply())
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        request = journey_text.ComposeRequest(transcript=RAW, topic='idea')
+        with patch.object(journey_text.httpx, 'AsyncClient', return_value=client):
+            async for _ in journey_text.compose_notes(request, {**PRIMARY, 'reasoning_effort': 'none'}):
+                pass
+        self.assertTrue(payloads)
+        self.assertTrue(all(item.get('reasoning_effort') == 'none' for item in payloads))
+
+    async def test_reasoning_effort_is_omitted_by_default(self):
+        payloads = []
+
+        def handler(request):
+            payloads.append(json.loads(request.content))
+            return httpx.Response(200, json=reply())
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        request = journey_text.ComposeRequest(transcript=RAW, topic='idea')
+        with patch.object(journey_text.httpx, 'AsyncClient', return_value=client):
+            async for _ in journey_text.compose_notes(request, PRIMARY):
+                pass
+        self.assertTrue(payloads)
+        self.assertTrue(all('reasoning_effort' not in item for item in payloads))
+
     async def test_balance_error_without_fallback_is_explicit(self):
         def handler(request):
             return httpx.Response(402, json={'error': {'message': 'Insufficient Balance'}})
