@@ -43,7 +43,8 @@ def check_detail(name, check):
     if name == 'text':
         if check.get('primary_ok') is False:
             balance = check.get('balance')
-            return 'DeepSeek 不可用' + (('（余额 ' + str(balance) + '）') if balance is not None else '')
+            label = str(check.get('model') or '主模型')
+            return label + ' 不可用' + (('（余额 ' + str(balance) + '）') if balance is not None else '')
         return '文本模型 ' + (check.get('model') or '未配置') + ((' → ' + check['fallback']) if check.get('fallback') else '')
     if name == 'tts':
         return '声音合成 ' + (check.get('provider') or '未配置')

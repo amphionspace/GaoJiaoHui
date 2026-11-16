@@ -398,7 +398,8 @@ def build_alerts(checks, snapshot):
             detail = f"{check.get('percent', 0)}% 已用，剩余 {check.get('free_gb', 0)}G"
         elif name == 'text':
             if check.get('primary_ok') is False and check.get('balance') is not None:
-                detail = 'DeepSeek 余额不足（' + str(check.get('balance')) + '），已降级 ' + str(check.get('fallback') or '兜底')
+                label = str(check.get('model') or '主模型')
+                detail = label + ' 余额不足（' + str(check.get('balance')) + '），已降级 ' + str(check.get('fallback') or '兜底')
             elif check.get('recent_failures'):
                 detail = '主模型与兜底均不可用'
             else:

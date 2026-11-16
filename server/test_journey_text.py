@@ -319,6 +319,80 @@ class JourneyTextTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('最多50', calls[-2]['messages'][-1]['content'])
 
 
+class BalanceProbeTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        journey_text._primary_status.update(at=0.0, value=None)
+        patcher = patch.dict('os.environ', {'JOURNEY_TEXT_MIN_BALANCE': '1'})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def config(self, **extra):
+        return {'url': 'https://api.aggregator.test/v1/chat/completions',
+                'model': 'aggregator-model', 'api_key': 'k', **extra}
+
+    async def probe(self, config, handler):
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        with patch.object(journey_text, 'configuration', return_value=config), \
+             patch.object(journey_text.httpx, 'AsyncClient', return_value=client):
+            return await journey_text.primary_status()
+
+    async def test_wallet_balance_above_the_minimum_is_healthy(self):
+        seen = {}
+
+        def handler(request):
+            seen['url'] = str(request.url)
+            seen['auth'] = request.headers.get('authorization')
+            return httpx.Response(200, json={'code': True, 'data': {'available_amount': '970.81', 'currency': 'CNY'}})
+
+        result = await self.probe(self.config(balance_url='https://api.aggregator.test/api/wallet',
+                                              balance_field='data.available_amount'), handler)
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['balance'], 970.81)
+        self.assertEqual(seen['url'], 'https://api.aggregator.test/api/wallet')
+        self.assertEqual(seen['auth'], 'Bearer k')
+
+    async def test_wallet_balance_below_the_minimum_is_reported(self):
+        def handler(request):
+            return httpx.Response(200, json={'data': {'available_amount': 0.4}})
+
+        result = await self.probe(self.config(balance_url='https://api.aggregator.test/api/wallet',
+                                              balance_field='data.available_amount'), handler)
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['balance'], 0.4)
+        self.assertEqual(result['detail'], '余额不足')
+
+    async def test_wallet_http_error_degrades_without_raising(self):
+        def handler(request):
+            return httpx.Response(503, json={'error': 'busy'})
+
+        result = await self.probe(self.config(balance_url='https://api.aggregator.test/api/wallet'), handler)
+        self.assertFalse(result['ok'])
+        self.assertIsNone(result['balance'])
+        self.assertIn('503', result['detail'])
+
+    async def test_missing_balance_field_is_reported(self):
+        def handler(request):
+            return httpx.Response(200, json={'data': {'balance': '10'}})
+
+        result = await self.probe(self.config(balance_url='https://api.aggregator.test/api/wallet',
+                                              balance_field='data.available_amount'), handler)
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['detail'], '余额字段缺失')
+
+    async def test_a_provider_without_a_balance_endpoint_is_not_probed(self):
+        def handler(request):  # pragma: no cover - must never run
+            raise AssertionError('unexpected probe')
+
+        self.assertIsNone(await self.probe(self.config(), handler))
+
+    def test_field_value_reads_nested_paths(self):
+        payload = {'data': {'wallet': {'available_amount': '12.5'}}, 'items': [{'v': 3}]}
+        self.assertEqual(journey_text.field_value(payload, 'data.wallet.available_amount'), '12.5')
+        self.assertEqual(journey_text.field_value(payload, 'items.0.v'), 3)
+        self.assertIsNone(journey_text.field_value(payload, 'data.missing'))
+        self.assertIsNone(journey_text.field_value(payload, ''))
+
+
 class EvaluationChecksTests(unittest.TestCase):
     def test_full_duplex_case_accepts_direct_response_without_identity_or_advice(self):
         case = next(case for case in CASES if case['id'] == 'user-full-duplex')

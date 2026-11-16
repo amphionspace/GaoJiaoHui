@@ -167,7 +167,7 @@ def configuration():
         except (OSError, ValueError):
             raise HTTPException(503, detail={"code": "text_config_invalid", "message": "文本服务配置文件无法读取，请检查 .env.journey.json。"})
     config = {name: str(os.environ.get("JOURNEY_LLM_" + name.upper(), values.get(name, ""))).strip()
-              for name in ("url", "model", "api_key", "reasoning_effort")}
+              for name in ("url", "model", "api_key", "reasoning_effort", "balance_url", "balance_field")}
     if config["url"]:
         try:
             url = httpx.URL(config["url"])
@@ -280,15 +280,45 @@ PRIMARY_STATUS_TTL = 60
 _primary_status = {'at': 0.0, 'value': None}
 
 
+def minimum_balance():
+    try:
+        return float(os.environ.get('JOURNEY_TEXT_MIN_BALANCE', '1'))
+    except ValueError:
+        return 1.0
+
+
+def field_value(payload, path):
+    """Read a dotted path such as data.available_amount from a JSON response."""
+    value = payload
+    for part in str(path or '').split('.'):
+        if not part:
+            return None
+        if isinstance(value, dict):
+            value = value.get(part)
+        elif isinstance(value, list) and part.isdigit() and int(part) < len(value):
+            value = value[int(part)]
+        else:
+            return None
+    return value
+
+
 async def primary_status(timeout=5):
-    """Return DeepSeek balance/availability; None for other providers."""
+    """Return the primary provider's balance/availability; None when unprobed.
+
+    DeepSeek answers /user/balance with balance_infos; aggregator platforms
+    expose their own wallet endpoint, so balance_url + balance_field let the
+    same probe follow whichever provider the config points at.
+    """
     config = configuration()
-    if 'api.deepseek.com' not in str(config.get('url', '')):
+    url = str(config.get('url', ''))
+    deepseek = 'api.deepseek.com' in url
+    wallet_url = str(config.get('balance_url') or '').strip()
+    if not deepseek and not wallet_url:
         return None
     now = time.monotonic()
     if now - _primary_status['at'] < PRIMARY_STATUS_TTL and _primary_status['value'] is not None:
         return _primary_status['value']
-    endpoint = str(config['url']).split('/chat/completions')[0] + '/user/balance'
+    endpoint = (str(config['url']).split('/chat/completions')[0] + '/user/balance') if deepseek else wallet_url
     try:
         async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
             response = await client.get(endpoint, headers={'Authorization': 'Bearer ' + config['api_key']})
@@ -296,15 +326,19 @@ async def primary_status(timeout=5):
             value = {'ok': False, 'available': False, 'balance': None, 'detail': 'HTTP ' + str(response.status_code)}
         else:
             payload = response.json()
-            infos = payload.get('balance_infos') or []
-            total = sum(float(item.get('total_balance') or 0) for item in infos if isinstance(item, dict))
-            try:
-                minimum = float(os.environ.get('JOURNEY_TEXT_MIN_BALANCE', '1'))
-            except ValueError:
-                minimum = 1.0
-            available = bool(payload.get('is_available'))
-            value = {'ok': available and total >= minimum, 'available': available,
-                     'balance': round(total, 2), 'detail': '' if available and total >= minimum else '余额不足'}
+            minimum = minimum_balance()
+            if deepseek:
+                infos = payload.get('balance_infos') or []
+                total = sum(float(item.get('total_balance') or 0) for item in infos if isinstance(item, dict))
+                available = bool(payload.get('is_available'))
+            else:
+                raw = field_value(payload, config.get('balance_field') or 'data.available_amount')
+                total = float(raw) if raw is not None else None
+                available = total is not None
+            enough = total is not None and total >= minimum
+            value = {'ok': available and enough, 'available': available,
+                     'balance': round(total, 2) if total is not None else None,
+                     'detail': '' if available and enough else ('余额不足' if total is not None else '余额字段缺失')}
     except Exception as error:  # noqa: BLE001 - the health probe must never raise
         value = {'ok': False, 'available': False, 'balance': None, 'detail': type(error).__name__}
     _primary_status.update(at=now, value=value)
