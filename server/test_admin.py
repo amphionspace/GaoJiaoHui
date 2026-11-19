@@ -133,6 +133,24 @@ class AdminTests(unittest.IsolatedAsyncioTestCase):
         # A non-local peer cannot spoof the allowlist with a forwarded header.
         self.assertEqual(direct.status_code, 403)
 
+    async def test_print_report_logs_the_paper_size_and_screen_metrics(self):
+        import contextlib
+        import io
+
+        event = main.PrintEvent(session_id='abc123', paper='80mm x 170mm', page_css='80mm 170mm',
+                                root_px='302.4x642.5', viewport_px='1440x900', dpr=2, elapsed_ms=1800)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            result = await main.journey_print(event)
+        line = buffer.getvalue()
+        self.assertIn('paper=80mm x 170mm', line)
+        self.assertIn('css=80mm 170mm', line)
+        self.assertIn('root=302.4x642.5', line)
+        self.assertIn('dpr=2.0', line)
+        self.assertIn('elapsed_ms=1800', line)
+        self.assertIn('session=abc123', line)
+        self.assertIn('printed', result)
+
     async def test_health_reports_checks_and_recent_counters(self):
         async with client() as api:
             response = await api.get('/api/health')

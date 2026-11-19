@@ -652,11 +652,21 @@ async def asr_session():
 
 class PrintEvent(BaseModel):
     session_id: str = Field(default='', max_length=64, pattern=r'^[0-9a-zA-Z-]*$')
+    # Sent by the page so the journal shows which paper the receipt was laid out for.
+    paper: str = Field(default='', max_length=40)
+    page_css: str = Field(default='', max_length=40)
+    root_px: str = Field(default='', max_length=40)
+    viewport_px: str = Field(default='', max_length=40)
+    dpr: float = Field(default=1, ge=0, le=10)
+    elapsed_ms: int = Field(default=0, ge=0, le=600000)
 
 
 @app.post('/api/journey/print', dependencies=[Depends(compose_access)])
 async def journey_print(event: PrintEvent):
     metrics_store.event('print')
+    print('journey print paper=%s css=%s root=%s viewport=%s dpr=%s elapsed_ms=%s session=%s' % (
+        event.paper or 'unknown', event.page_css or 'unknown', event.root_px or 'unknown',
+        event.viewport_px or 'unknown', event.dpr, event.elapsed_ms, (event.session_id or '')[:8]), flush=True)
     return {'printed': sessions.mark_printed(event.session_id)}
 
 

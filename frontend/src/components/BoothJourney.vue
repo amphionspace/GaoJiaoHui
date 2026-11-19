@@ -94,11 +94,26 @@ function uploadVisitAudio(blob, sessionId) {
     method: 'POST', headers: { 'X-API-Key': store.apiKey }, body: data,
   }).catch(() => {})
 }
-function reportPrint(sessionId) {
+// Keep in sync with the @page rule in journey.css.
+const PRINT_PAPER = '80mm x 170mm'
+function printDiagnostics() {
+  const root = document.getElementById('journey-print-root')
+  const rect = root?.getBoundingClientRect?.()
+  return {
+    paper: PRINT_PAPER,
+    page_css: '80mm 170mm',
+    root_px: rect ? Math.round(rect.width * 10) / 10 + 'x' + Math.round(rect.height * 10) / 10 : '',
+    viewport_px: window.innerWidth + 'x' + window.innerHeight,
+    dpr: window.devicePixelRatio || 1,
+  }
+}
+function reportPrint(sessionId, elapsedMs) {
   if (!sessionId) return
+  const diagnostics = { ...printDiagnostics(), elapsed_ms: Math.round(elapsedMs || 0) }
+  console.info('[print]', sessionId, diagnostics)
   fetch('/api/journey/print', {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': store.apiKey },
-    body: JSON.stringify({ session_id: sessionId }),
+    body: JSON.stringify({ session_id: sessionId, ...diagnostics }),
   }).catch(() => {})
 }
 
@@ -370,10 +385,12 @@ async function togglePlayback() {
   if (!audioPaused.value) { sound.pause(); audioPaused.value = true }
   else { try { await sound.resume(); audioPaused.value = false } catch { error.value = '播放未能继续，请重新播放。' } }
 }
+let printStartedAt = 0
 async function printJournal() {
   if (!journal.value?.summary || stage.value === 'printing' || imageBusy.value || notePending.value) return
   const id = session, printText = journal.value.noteText || journal.value.summary
   stopPlayback(); stopRecording(); stage.value = 'printing'; printReturned.value = false
+  printStartedAt = performance.now()
   await nextTick()
   try {
     for (const img of document.querySelectorAll?.('#journey-print-root img') || []) await img.decode()
@@ -396,7 +413,7 @@ async function printJournal() {
 function afterPrint() {
   if (stage.value !== 'printing') return
   printReturned.value = true
-  reportPrint(journal.value?.sessionId || visitSession)
+  reportPrint(journal.value?.sessionId || visitSession, performance.now() - printStartedAt)
 }
 function backToPreview() { stage.value = 'preview' }
 function complete() { cancelSession(); stage.value = 'done'; error.value = notice.value = '' }
