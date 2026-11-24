@@ -12,7 +12,9 @@ import os
 import httpx
 
 DEFAULT_BASE = 'https://speeker.amphiondev.com'
-MODELS = ('voxcpm2', 'fireredtts3')
+MODELS = ('voxcpm2', 'fireredtts3', 'dots-ts004')
+# Dots TS004 ships a fixed reference voice: no sample or transcript is sent.
+FIXED_VOICE = {'dots-ts004'}
 
 
 class EvalTTSError(Exception):
@@ -54,21 +56,25 @@ def _error_detail(response: httpx.Response) -> str:
     return (response.text or '')[:220]
 
 
-async def synthesize(model: str, text: str, reference: bytes, reference_text: str,
+async def synthesize(model: str, text: str, reference: bytes = b'', reference_text: str = '',
                      language: str = 'Chinese') -> bytes:
     if model not in MODELS:
         raise EvalTTSError('未知的评测 TTS 模型', status=400)
-    if not reference or not reference.startswith(b'RIFF') or not reference_text.strip():
-        raise EvalTTSError('缺少参考音频或原文', status=400)
     config = configuration()
-    files = {'reference': ('reference.wav', reference, 'audio/wav')}
-    data = {
-        'mode': 'clone',
-        'text': str(text)[:500],
-        'reference_text': str(reference_text).strip()[:500],
-    }
-    if model == 'fireredtts3':
-        data['language'] = language_name(language)
+    if model in FIXED_VOICE:
+        files = None
+        data = {'mode': 'speaker', 'text': str(text)[:500]}
+    else:
+        if not reference or not reference.startswith(b'RIFF') or not reference_text.strip():
+            raise EvalTTSError('缺少参考音频或原文', status=400)
+        files = {'reference': ('reference.wav', reference, 'audio/wav')}
+        data = {
+            'mode': 'clone',
+            'text': str(text)[:500],
+            'reference_text': str(reference_text).strip()[:500],
+        }
+        if model == 'fireredtts3':
+            data['language'] = language_name(language)
     url = config['base_url'] + '/tts-eval/speech/' + model
     headers = {'Authorization': 'Bearer ' + config['api_key']}
     last_error = None

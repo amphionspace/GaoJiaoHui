@@ -19,6 +19,7 @@ MODES = {
     'bailian': {'label': '百炼 Qwen', 'order': ['bailian']},
     'voxcpm2': {'label': 'VoxCPM2 + 百炼', 'order': ['voxcpm2', 'bailian']},
     'fireredtts3': {'label': 'FireRedTTS3 + 百炼', 'order': ['fireredtts3', 'bailian']},
+    'dots-ts004': {'label': 'Dots TS004（固定音色）+ 百炼', 'order': ['dots-ts004', 'bailian']},
 }
 DEFAULT_MODE = 'bailian'
 

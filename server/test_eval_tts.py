@@ -43,6 +43,30 @@ class EvalTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('参考原文'.encode(), body)
         self.assertIn(b'filename="reference.wav"', body)
 
+    async def test_fixed_voice_model_sends_speaker_mode_without_reference(self):
+        calls = []
+
+        def handler(request: httpx.Request):
+            calls.append(request)
+            return httpx.Response(200, content=wav_bytes(), request=request)
+
+        transport = httpx.MockTransport(handler)
+        real = httpx.AsyncClient
+
+        def factory(*args, **kwargs):
+            kwargs['transport'] = transport
+            return real(*args, **kwargs)
+
+        with patch.dict(os.environ, {'EVAL_TTS_API_KEY': 'eval-key', 'EVAL_TTS_BASE_URL': 'https://eval.test', 'EVAL_TTS_RETRIES': '0'}), \
+             patch.object(eval_tts.httpx, 'AsyncClient', factory):
+            audio = await eval_tts.synthesize('dots-ts004', '你好')
+        self.assertTrue(audio.startswith(b'RIFF'))
+        self.assertEqual(calls[0].url.path, '/tts-eval/speech/dots-ts004')
+        body = calls[0].content
+        self.assertIn(b'speaker', body)
+        self.assertNotIn(b'filename="reference.wav"', body)
+        self.assertNotIn(b'reference_text', body)
+
     async def test_firered_language_and_busy_retry(self):
         calls = []
 

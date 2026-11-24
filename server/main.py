@@ -537,26 +537,38 @@ async def synthesize_journey_speech(request, body):
     text = strip_disclaimers(str(body.get("input", "")).strip())
     if not voice or not text or len(text) > 600:
         raise HTTPException(400, "请提供有效的本人音色和朗读文字。")
-    key = await bailian_tts.check_voice(request, voice)
-    body["input"] = text
     order = tts_settings.order()
+    model = order[0] if order and order[0] in eval_tts.MODELS else ''
+    fixed_voice = model in eval_tts.FIXED_VOICE
+    # A fixed-voice model brings its own reference, so the visitor's cloned
+    # voice is not required (and must not block the request).
+    key = '' if fixed_voice else await bailian_tts.check_voice(request, voice)
+    body["input"] = text
 
-    if order and order[0] in eval_tts.MODELS:
-        model = order[0]
-        sample = voice_samples.load(voice)
-        reference_text = voice_samples.load_text(voice)
-        if sample and reference_text:
+    if model:
+        if fixed_voice:
             try:
-                audio = await eval_tts.synthesize(
-                    model, text, sample, reference_text, body.get("language", "Chinese")
-                )
+                audio = await eval_tts.synthesize(model, text)
                 metrics_store.event("tts_" + model + "_ok")
                 return audio
             except eval_tts.EvalTTSError as error:
                 metrics_store.event("tts_" + model + "_fail")
                 print(model + " tts failed:", str(error)[:120], str(error.detail)[:120])
         else:
-            metrics_store.event("tts_no_sample")
+            sample = voice_samples.load(voice)
+            reference_text = voice_samples.load_text(voice)
+            if sample and reference_text:
+                try:
+                    audio = await eval_tts.synthesize(
+                        model, text, sample, reference_text, body.get("language", "Chinese")
+                    )
+                    metrics_store.event("tts_" + model + "_ok")
+                    return audio
+                except eval_tts.EvalTTSError as error:
+                    metrics_store.event("tts_" + model + "_fail")
+                    print(model + " tts failed:", str(error)[:120], str(error.detail)[:120])
+            else:
+                metrics_store.event("tts_no_sample")
 
     if "amphion" in order and not amphion_tts.cooling_down():
         sample = voice_samples.load(voice)
@@ -575,6 +587,8 @@ async def synthesize_journey_speech(request, body):
         if order and order[0] in eval_tts.MODELS:
             raise HTTPException(502, "本人音色缺少参考原文，无法使用克隆合成；请重新讲述或切换备用语音。")
         raise HTTPException(502, "自建语音合成暂时不可用，请稍后重试。")
+    if not key:
+        key = await bailian_tts.check_voice(request, voice)
     metrics_store.event("tts_failover")
     try:
         audio = await bailian_tts.synthesize(request, body, key=key)
@@ -733,7 +747,7 @@ class TtsMode(BaseModel):
 @app.post('/api/admin/tts-order', dependencies=[Depends(require_admin)])
 async def admin_tts_order(payload: TtsMode):
     value = payload.mode.strip().lower()
-    if value in ('voxcpm2', 'fireredtts3') and not eval_tts.enabled():
+    if value in eval_tts.MODELS and not eval_tts.enabled():
         raise HTTPException(503, 'EVAL_TTS_API_KEY 尚未配置')
     try:
         tts_settings.set_mode(value)
@@ -881,7 +895,7 @@ const dot = ok => '<span class="dot ' + (ok ? 'ok' : 'bad') + '"></span>'
 const CHECK_LABELS = { frontend: '前端构建', api: '接口可用性', text: '文本模型', asr: '语音识别', tts: '声音合成', image: '插画服务', disk: '磁盘' }
 const TOPIC_LABELS = { future: '未来', product: '产品', idea: '想法', story: '故事' }
 let openSessions = new Set()
-const EVENT_LABELS = { compose_draft: '草稿上屏', compose_final: '审校完成', compose_review_fallback: '审校回退', compose_error: '整理失败', asr_session: '语音会话', illustrate: '插画请求', illustrate_error: '插画失败', tts_amphion_ok: '自建TTS成功', tts_amphion_fail: '自建TTS失败', tts_voxcpm2_ok: 'VoxCPM2成功', tts_voxcpm2_fail: 'VoxCPM2失败', tts_fireredtts3_ok: 'FireRed成功', tts_fireredtts3_fail: 'FireRed失败', tts_no_sample: '无参考音', tts_failover: '降级百炼', text_failover: '文本降级', tts_bailian_ok: '百炼成功', tts_bailian_fail: '百炼失败', tts_mode_set: '切换TTS' }
+const EVENT_LABELS = { compose_draft: '草稿上屏', compose_final: '审校完成', compose_review_fallback: '审校回退', compose_error: '整理失败', asr_session: '语音会话', illustrate: '插画请求', illustrate_error: '插画失败', tts_amphion_ok: '自建TTS成功', tts_amphion_fail: '自建TTS失败', tts_voxcpm2_ok: 'VoxCPM2成功', tts_voxcpm2_fail: 'VoxCPM2失败', tts_fireredtts3_ok: 'FireRed成功', tts_fireredtts3_fail: 'FireRed失败', 'tts_dots-ts004_ok': 'Dots成功', 'tts_dots-ts004_fail': 'Dots失败', tts_no_sample: '无参考音', tts_failover: '降级百炼', text_failover: '文本降级', tts_bailian_ok: '百炼成功', tts_bailian_fail: '百炼失败', tts_mode_set: '切换TTS' }
 const LATENCY_LABELS = { compose_draft_seconds: '草稿时延', compose_final_seconds: '终版时延' }
 function detail(name, check) {
   if (name === 'text') {

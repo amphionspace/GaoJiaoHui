@@ -21,6 +21,17 @@ class TtsSettingsTests(unittest.TestCase):
                 self.assertEqual(path.read_text().strip(), '{"mode": "voxcpm2"}')
                 self.assertEqual(tts_settings.label(), 'VoxCPM2 + 百炼')
 
+    def test_fixed_voice_model_is_selectable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'settings.json'
+            with patch.dict(os.environ, {'JOURNEY_TTS_SETTINGS_FILE': str(path)}):
+                tts_settings.set_mode('dots-ts004')
+                self.assertEqual(tts_settings.mode(), 'dots-ts004')
+                self.assertEqual(tts_settings.order(), ['dots-ts004', 'bailian'])
+                self.assertIn('固定音色', tts_settings.label())
+                values = [item['value'] for item in tts_settings.status()['modes']]
+                self.assertIn('dots-ts004', values)
+
     def test_unknown_mode_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'settings.json'
