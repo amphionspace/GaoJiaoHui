@@ -1,6 +1,7 @@
 /* Amphion 网关 HTTP 客户端：经本地 FastAPI /proxy 同源转发（网关未开 CORS）
    WS 仍由浏览器直连 wss://amphion.top（不受 CORS 限制） */
 import { store } from './store.js'
+import { timeoutSignal } from './abortSignals.js'
 
 export let WS_HOST = 'wss://amphion.top'
 // cn-test 迁移期（2026-10）：/asr/v1/realtime 仅存在于 legacy 网关（106.52.52.196，新集群 404）。
@@ -9,7 +10,7 @@ export let WS_HOST = 'wss://amphion.top'
 export let WS_HOST_LEGACY = 'wss://amphion-gjh.amphiondev.com/ws-legacy'
 
 export async function loadRuntimeConfig() {
-  const response = await fetch('/api/config', { signal: AbortSignal.timeout(8000) })
+  const response = await fetch('/api/config', { signal: timeoutSignal(8000) })
   if (!response.ok) throw new Error('本地服务未连接，请检查服务是否启动后刷新。')
   const config = await response.json()
   for (const url of [config.wsHost, config.wsLegacy]) {

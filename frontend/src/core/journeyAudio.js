@@ -1,5 +1,6 @@
 import { Mic, SR, FRAME, b64frame, wavEncode } from './audio.js'
 import { WS_HOST, api } from './api.js'
+import { anySignal, timeoutSignal } from './abortSignals.js'
 import { createSpeechDetector } from './journeySpeech.js'
 import { store } from './store.js'
 
@@ -367,7 +368,7 @@ export class JourneySound {
     const ready = await this.readyOutput()
     if (generation !== this.generation) return false
     if (!ready) throw new DOMException('请点击播放以开启声音。', 'NotAllowedError')
-    const response = await fetch(url, { signal: AbortSignal.timeout(15000) })
+    const response = await fetch(url, { signal: timeoutSignal(15000) })
     if (!response.ok) throw new Error('音频读取失败，请重试。')
     const buffer = await this.context.decodeAudioData(await response.arrayBuffer())
     if (generation !== this.generation) return false
@@ -457,7 +458,7 @@ function forgetVoice(name) {
 async function deleteJourneyVoice(key, name) {
   try {
     await api('/tts/v1/audio/voices/' + encodeURIComponent(name), {
-      prefix: '/api/journey', method: 'DELETE', headers: { 'X-API-Key': key }, signal: AbortSignal.timeout(15000), keepalive: true,
+      prefix: '/api/journey', method: 'DELETE', headers: { 'X-API-Key': key }, signal: timeoutSignal(15000), keepalive: true,
     })
   } catch (error) {
     if (error.status !== 404) { rememberVoice(name); return false }
@@ -523,7 +524,7 @@ export class JourneyVoice {
     // Persist before uploading: page termination can otherwise strand a server voice.
     rememberVoice(this.name)
     // The dedicated worker transcribes this exact sample and extracts its clone prompt.
-    const upload = () => this.request('/tts/v1/audio/voices', { method: 'POST', body: data, signal: AbortSignal.timeout(240000) })
+    const upload = () => this.request('/tts/v1/audio/voices', { method: 'POST', body: data, signal: timeoutSignal(240000) })
     let result
     try { result = await upload() } catch (error) {
       if (!quotaError(error) || this.disposed) throw error
@@ -545,7 +546,7 @@ export class JourneyVoice {
     let blob
     try { blob = await this.request('/tts/v1/audio/speech', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(240000)]),
+      signal: anySignal([this.abort.signal, timeoutSignal(240000)]),
       body: JSON.stringify({ voice: this.name, input: text, response_format: 'wav', sample_rate: 24000, language: store.locale === 'en' ? 'English' : 'Chinese' }),
     })
     } catch (error) {
@@ -578,7 +579,7 @@ export async function cleanJourneyVoices(key, { recoverOrphans = false } = {}) {
     const names = new Set(pendingVoices())
     if (recoverOrphans) {
       try {
-        const response = await api('/tts/v1/audio/voices', { prefix: '/api/journey', headers: { 'X-API-Key': key }, signal: AbortSignal.timeout(15000) })
+        const response = await api('/tts/v1/audio/voices', { prefix: '/api/journey', headers: { 'X-API-Key': key }, signal: timeoutSignal(15000) })
         const list = response?.voices || response?.items || (Array.isArray(response) ? response : [])
         for (const item of list) {
           const name = typeof item === 'string' ? item : item.voice_name || item.name

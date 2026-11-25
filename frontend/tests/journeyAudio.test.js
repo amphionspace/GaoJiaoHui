@@ -73,6 +73,13 @@ async function audioModule(api = async () => ({}), options = {}) {
           flush() {}, dispose() {},
         }) }
       : specifier === './store.js' ? { store: { asrManaged: options.managed === true } }
+      : specifier === './abortSignals.js' ? {
+          anySignal: signals => AbortSignal.any(signals),
+          timeoutSignal: milliseconds => AbortSignal.timeout(milliseconds),
+          withTimeout: (signal, milliseconds) => signal
+            ? AbortSignal.any([signal, AbortSignal.timeout(milliseconds)])
+            : AbortSignal.timeout(milliseconds),
+        }
       : { WS_HOST: 'wss://example.test', api }
     return new vm.SyntheticModule(Object.keys(values), function () { for (const [key, value] of Object.entries(values)) this.setExport(key, value) }, { context: ctx })
   })

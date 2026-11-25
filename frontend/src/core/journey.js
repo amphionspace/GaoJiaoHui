@@ -1,3 +1,5 @@
+import { withTimeout } from './abortSignals.js'
+
 export const TOPICS = [
   { id: 'product', number: '01', title: '最惊喜的产品', subtitle: '让你眼前一亮的科技', prompt: '我今天看到最惊喜的产品是……', color: 'mint' },
   { id: 'idea', number: '02', title: '一个新想法', subtitle: '关于未来的灵感', prompt: '我突然有个想法……', color: 'blue' },
@@ -97,7 +99,7 @@ const responseError = data => new Error(typeof data?.detail === 'string'
 export async function composeJourneyJournal(journal, { signal, apiKey = '', request = fetch, language = 'zh', sessionId = '', onDraft, onWarning } = {}) {
   // Send the complete ASR record, including later corrections and additions.
   const body = JSON.stringify({ transcript: journal.originalText, topic: journal.topicId, language, session_id: sessionId })
-  const timeout = signal ? AbortSignal.any([signal, AbortSignal.timeout(90000)]) : AbortSignal.timeout(90000)
+  const timeout = withTimeout(signal, 90000)
   const response = await request('/api/journey/compose/stream', {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
     signal: timeout, body,
@@ -148,7 +150,7 @@ export async function composeJourneyJournal(journal, { signal, apiKey = '', requ
 export async function illustrateJourneyJournal(journal, { signal, apiKey = '', request = fetch } = {}) {
   const response = await request('/api/journey/illustrate', {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
-    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(105000)]) : AbortSignal.timeout(105000),
+    signal: withTimeout(signal, 105000),
     body: JSON.stringify({ summary: journal.summary, scene: journal.sketchPrompt || journal.summary }),
   })
   const data = await response.json()
