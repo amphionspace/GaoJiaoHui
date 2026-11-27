@@ -9,10 +9,12 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 try:
+    from . import sessions
     from .bailian_tts import configuration, _headers
     from .security import compose_access
     from .metrics import metrics
 except ImportError:
+    import sessions
     from bailian_tts import configuration, _headers
     from security import compose_access
     from metrics import metrics
@@ -26,6 +28,7 @@ class SketchRequest(BaseModel):
     # note limits instead of the old Chinese-only 110/180.
     summary: str = Field(min_length=2, max_length=400)
     scene: str = Field(default='', max_length=400)
+    session_id: str = Field(default='', max_length=64, pattern=r'^[0-9a-zA-Z-]*$')
 
 
 def sketch_prompt(scene):
@@ -150,4 +153,13 @@ async def generate_sketch(summary):
 
 @router.post('/illustrate', dependencies=[Depends(compose_access)])
 async def illustrate(request: SketchRequest):
-    return await generate_sketch(request.scene.strip() or request.summary)
+    result = await generate_sketch(request.scene.strip() or request.summary)
+    # Keep the sketch with the session so staff can review it later.
+    if request.session_id:
+        try:
+            raw = base64.b64decode(result['image'].split(',', 1)[1])
+        except (KeyError, ValueError, IndexError):
+            raw = b''
+        if raw:
+            sessions.save_image(request.session_id, raw)
+    return result

@@ -155,7 +155,8 @@ export async function illustrateJourneyJournal(journal, { signal, apiKey = '', r
   const response = await request('/api/journey/illustrate', {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
     signal: withTimeout(signal, 105000),
-    body: JSON.stringify({ summary: journal.summary, scene: journal.sketchPrompt || journal.summary }),
+    body: JSON.stringify({ summary: journal.summary, scene: journal.sketchPrompt || journal.summary,
+      session_id: journal.sessionId || '' }),
   })
   const data = await response.json()
   if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : '插画暂时未能生成，可以重试或打印文字手记。')

@@ -65,8 +65,13 @@ def audio_dir():
     return Path(os.environ.get('JOURNEY_SESSION_AUDIO_DIR', str(ROOT / '.journey-state' / 'audio')))
 
 
+def image_dir():
+    return Path(os.environ.get('JOURNEY_SESSION_IMAGE_DIR', str(ROOT / '.journey-state' / 'images')))
+
+
 COLUMNS = {
     'visitor_no': 'INTEGER',
+    'sketch': 'TEXT',
     'status': "TEXT NOT NULL DEFAULT 'draft'",
     'error_code': "TEXT NOT NULL DEFAULT ''",
     'printed_at': 'TEXT',
@@ -156,6 +161,19 @@ def _prune(connection):
             (rows,),
         )
     _orphan_audio(connection)
+    _orphan_images(connection)
+
+
+def _orphan_images(connection):
+    if not image_dir().exists():
+        return
+    known = {row[0] for row in connection.execute('SELECT id FROM sessions')}
+    for file in image_dir().glob('*.png'):
+        if file.stem not in known:
+            try:
+                file.unlink()
+            except OSError:
+                pass
 
 
 def _orphan_audio(connection):
@@ -176,6 +194,13 @@ def _delete_audio_files(session_id):
             (audio_dir() / f'{session_id}.{kind}.wav').unlink()
         except OSError:
             pass
+
+
+def _delete_image(session_id):
+    try:
+        (image_dir() / f'{session_id}.png').unlink()
+    except OSError:
+        pass
 
 
 def _trim_audio(connection):
@@ -279,6 +304,54 @@ def _wav_seconds(raw):
         return 0.0
 
 
+def save_image(session_id, raw):
+    """Keep the generated sketch so staff can review it with the session."""
+    if not enabled() or not raw or len(raw) > MAX_AUDIO_BYTES:
+        return False
+    if not SESSION_ID.fullmatch(session_id or '') or not raw.startswith(b'\x89PNG\r\n\x1a\n'):
+        return False
+    directory = image_dir()
+    path = directory / f'{session_id}.png'
+    try:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        with _connection() as connection:
+            visitor_no, created = _visitor(connection, session_id)
+            connection.execute("""
+                INSERT INTO sessions (id, created_at, visitor_no, status, sketch)
+                VALUES (?, ?, ?, 'pending', ?)
+                ON CONFLICT(id) DO UPDATE SET sketch = excluded.sketch
+            """, (session_id, created, visitor_no, str(path)))
+        return True
+    except Exception as error:  # noqa: BLE001 - storage must never break the note
+        print('session sketch not stored:', type(error).__name__)
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return False
+
+
+def image_path(session_id):
+    if not SESSION_ID.fullmatch(session_id or ''):
+        return ''
+    try:
+        with _connection() as connection:
+            row = connection.execute('SELECT sketch FROM sessions WHERE id = ?', (session_id,)).fetchone()
+    except Exception:  # noqa: BLE001
+        return ''
+    if not row or not row['sketch']:
+        return ''
+    path = Path(row['sketch'])
+    try:
+        if path.resolve().parent != image_dir().resolve() or not path.is_file():
+            return ''
+    except OSError:
+        return ''
+    return str(path)
+
+
 def save_audio(session_id, kind, raw):
     if kind not in ('sample', 'reply', 'visit') or not enabled() or not audio_enabled():
         return 0.0
@@ -355,6 +428,7 @@ def _row(row):
         'printed_at': row['printed_at'] if 'printed_at' in keys else None,
         'has_sample': bool(row['sample_audio']) if 'sample_audio' in keys else False,
         'has_reply': bool(row['reply_audio']) if 'reply_audio' in keys else False,
+        'has_sketch': bool(row['sketch']) if 'sketch' in keys else False,
         'reply_seconds': row['reply_seconds'] if 'reply_seconds' in keys else None,
         'has_visit': bool(row['visit_audio']) if 'visit_audio' in keys else False,
         'visit_seconds': row['visit_seconds'] if 'visit_seconds' in keys else None,
@@ -394,6 +468,8 @@ def summary():
             'audio': connection.execute(
                 'SELECT COUNT(*) FROM sessions WHERE sample_audio IS NOT NULL OR reply_audio IS NOT NULL '
                 'OR visit_audio IS NOT NULL').fetchone()[0],
+            'sketches': connection.execute(
+                'SELECT COUNT(*) FROM sessions WHERE sketch IS NOT NULL').fetchone()[0],
         })
     return base
 
@@ -403,6 +479,12 @@ def clear():
         connection.execute('DELETE FROM sessions')
     if audio_dir().exists():
         for file in audio_dir().glob('*.wav'):
+            try:
+                file.unlink()
+            except OSError:
+                pass
+    if image_dir().exists():
+        for file in image_dir().glob('*.png'):
             try:
                 file.unlink()
             except OSError:

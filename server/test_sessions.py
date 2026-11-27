@@ -207,3 +207,35 @@ class VisitAudioTests(unittest.TestCase):
                 self.assertEqual(row['visit_seconds'], 1.0)
                 self.assertTrue(sessions.audio_path('e' * 32, 'visit'))
                 self.assertEqual(sessions.summary()['audio'], 1)
+
+
+class SketchStorageTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        base = Path(self.directory.name)
+        self.env = {
+            'JOURNEY_SESSION_LOG': '1', 'JOURNEY_SESSION_DB': str(base / 'sessions.sqlite3'),
+            'JOURNEY_SESSION_AUDIO_DIR': str(base / 'audio'),
+            'JOURNEY_SESSION_IMAGE_DIR': str(base / 'images'),
+        }
+
+    def test_sketch_is_stored_and_listed_with_the_session(self):
+        png = b'\x89PNG\r\n\x1a\n' + b'\x00' * 32
+        with patch.dict('os.environ', self.env):
+            self.assertTrue(sessions.save_image('a' * 32, png))
+            path = sessions.image_path('a' * 32)
+            self.assertTrue(path and path.endswith('.png'))
+            self.assertTrue(Path(path).is_file())
+            row = sessions.recent()[0]
+            self.assertTrue(row['has_sketch'])
+            self.assertEqual(sessions.summary()['sketches'], 1)
+            sessions.clear()
+            self.assertFalse(Path(path).exists())
+
+    def test_non_png_payload_is_rejected(self):
+        with patch.dict('os.environ', self.env):
+            self.assertFalse(sessions.save_image('b' * 32, b'not an image'))
+            self.assertEqual(sessions.image_path('b' * 32), '')

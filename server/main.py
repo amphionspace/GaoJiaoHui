@@ -710,6 +710,14 @@ async def admin_session_audio(session_id: str, kind: str):
     return FileResponse(path, media_type='audio/wav', headers={'Cache-Control': 'no-store'})
 
 
+@app.get('/api/admin/sessions/{session_id}/sketch', dependencies=[Depends(require_admin)])
+async def admin_session_sketch(session_id: str):
+    path = sessions.image_path(session_id)
+    if not path:
+        raise HTTPException(404, '没有保存这段插画。')
+    return FileResponse(path, media_type='image/png', headers={'Cache-Control': 'no-store'})
+
+
 @app.get('/api/health')
 async def health():
     checks = await health_checks()
@@ -765,6 +773,7 @@ async def admin_sessions(limit: int = 30, offset: int = 0):
     return {
         'enabled': summary['enabled'], 'retention_days': summary['retention_days'],
         'keep_transcript': sessions.keep_transcript(), 'total': summary['total'], 'audio': summary['audio'],
+        'sketches': summary.get('sketches', 0),
         'sessions': sessions.recent(limit, offset),
     }
 
@@ -840,6 +849,8 @@ button:hover{border-color:var(--acc);color:var(--acc)}
 .metric-value{font-size:34px;font-weight:700;color:#1c6bb0;line-height:1.1}
 .metric-value.bad{color:var(--bad)}
 .session-body audio{width:100%;max-width:420px;height:34px}
+.session-sketch{display:block;width:140px;height:auto;border:1px solid var(--line);border-radius:6px;background:#fff}
+.session-sketch-link{display:inline-block}
 .s-user{font-weight:600;font-size:12px}
 .session-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:10px}
 .session-head h2{margin:0}
@@ -1029,7 +1040,7 @@ function audioTag(item, kind, label) {
     encodeURIComponent(item.id) + '/audio/' + kind + '"></audio></div>'
 }
 function renderSessions(data) {
-  $('session-meta').textContent = data.enabled ? ('共 ' + data.total + ' 条 · 保留 ' + data.retention_days + ' 天 · 音频 ' + (data.audio || 0) + ' 条') : '未开启'
+  $('session-meta').textContent = data.enabled ? ('共 ' + data.total + ' 条 · 保留 ' + data.retention_days + ' 天 · 音频 ' + (data.audio || 0) + ' 条 · 插画 ' + (data.sketches || 0) + ' 张') : '未开启'
   $('session-note').textContent = data.enabled
     ? '会话内容与音频仅用于现场复盘，按保留期自动清理；包含访客录音、参考音与回信语音。'
     : '会话记录未开启：在服务器 /etc/amphion-gjh/session.env 设置 JOURNEY_SESSION_LOG=1 后重启。'
@@ -1041,7 +1052,7 @@ function renderSessions(data) {
     const meta = failed
       ? '未生成 · ' + esc(item.error_code || '失败')
       : item.transcript_chars + ' 字 · 草稿 ' + ms(item.draft_ms) + ' · 终版 ' + ms(item.final_ms) +
-        (item.reviewed ? ' · 已审校' : ' · 未审校') + (item.printed_at ? ' · 已打印' : '')
+        (item.reviewed ? ' · 已审校' : ' · 未审校') + (item.has_sketch ? ' · 有插画' : '') + (item.printed_at ? ' · 已打印' : '')
     return '<details class="session" data-id="' + esc(item.id) + '"' + (openSessions.has(item.id) ? ' open' : '') + '>' +
       '<summary><span class="s-user">' + esc(who) + '</span>' +
       '<span class="s-time">' + esc(item.created_at.slice(5)) + '</span>' +
@@ -1056,6 +1067,10 @@ function renderSessions(data) {
         (item.has_visit ? audioTag(item, 'visit', '访客录音' + (item.visit_seconds ? '（' + item.visit_seconds + ' 秒）' : '')) : '') +
         (item.has_sample ? audioTag(item, 'sample', '访客参考音') : '') +
         (item.has_reply ? audioTag(item, 'reply', '回信语音' + (item.reply_seconds ? '（' + item.reply_seconds + ' 秒）' : '')) : '') +
+        (item.has_sketch ? '<div><h4>插画</h4><a class="session-sketch-link" href="/api/admin/sessions/' +
+          encodeURIComponent(item.id) + '/sketch" target="_blank" rel="noopener" title="打开原图">' +
+          '<img class="session-sketch" src="/api/admin/sessions/' + encodeURIComponent(item.id) +
+          '/sketch" alt="本次插画" loading="lazy" /></a></div>' : '') +
         '<div><h4>元信息</h4><p>模型 ' + esc(item.model || '-') + ' · 语言 ' + esc(item.language || '-') +
           (item.printed_at ? ' · 打印于 ' + esc(item.printed_at) : '') + '</p></div>' +
       '</div></details>'
