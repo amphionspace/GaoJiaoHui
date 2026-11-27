@@ -249,16 +249,26 @@ def _ws_url(config, token):
     return base + '/v1/asr/realtime?' + urlencode({'speech_model': 'fourhz-spectrum', 'token': token})
 
 
-async def session_urls():
-    """Every usable endpoint, primary first: production, test, then the bridge."""
+async def session_urls(fallback=False):
+    """Every usable endpoint, fastest first: local bridge, production, then test.
+
+    FourHz hands out single-use tokens, so a new socket always needs a fresh
+    one: minting happens only when the caller actually needs that provider
+    (the bridge is static, so the normal path mints nothing and stays fast).
+    """
     urls = []
-    for config in [configuration(), *fallback_configurations()]:
-        try:
-            urls.append(_ws_url(config, await mint_token(config)))
-        except HTTPException:
-            continue
-    if deepfake_enabled():
+    if not fallback and deepfake_enabled():
         urls.append(deepfake_url())
+    else:
+        for config in [configuration(), *fallback_configurations()]:
+            try:
+                # Hand each token out exactly once: the provider accepts a single
+                # socket per token, so it is removed from the cache immediately.
+                token = await mint_token(config)
+                _token_cache.pop(_fingerprint(config), None)
+                urls.append(_ws_url(config, token))
+            except HTTPException:
+                continue
     if not urls:
         raise HTTPException(503, '语音服务暂时不可用，请稍后重试。')
     return urls

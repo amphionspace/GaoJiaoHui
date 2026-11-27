@@ -16,9 +16,9 @@ let sessionPending = null
 
 function takePreparedSession() {
   if (!preparedSession) return null
-  const { url, urls, at } = preparedSession
+  const { url, urls, fallback, at } = preparedSession
   preparedSession = null
-  return Date.now() - at < SESSION_REUSE_MS ? { url, urls } : null
+  return Date.now() - at < SESSION_REUSE_MS ? { url, urls, fallback } : null
 }
 
 function sessionCandidates(session) {
@@ -29,7 +29,7 @@ function sessionCandidates(session) {
 
 function rememberSession(session) {
   const urls = sessionCandidates(session)
-  preparedSession = urls.length ? { url: urls[0], urls, at: Date.now() } : null
+  preparedSession = urls.length ? { url: urls[0], urls, fallback: session?.fallback === true, at: Date.now() } : null
   return session
 }
 
@@ -188,7 +188,16 @@ export class JourneyRecorder {
       socketUrl = session.url
       candidates = sessionCandidates(session)
     }
-    const socket = this.socket = await this.openSocket(candidates).catch(error => { this.stop(); throw error })
+    let socket
+    try {
+      socket = await this.openSocket(candidates)
+    } catch (error) {
+      // The fast local bridge is a dead end: ask for the FourHz deployments.
+      if (!this.managed || session?.fallback !== true) { this.stop(); throw error }
+      const extra = await this.takeSession(this.sessionController?.signal, true)
+      socket = await this.openSocket(sessionCandidates(extra)).catch(next => { this.stop(); throw next })
+    }
+    this.socket = socket
     this.rejectStart = null
     if (this.closed) return
     let ready
