@@ -264,10 +264,8 @@ async def session_urls(stage=0):
     """
     configs = providers()
     bridge = deepfake_url() if deepfake_enabled() else ''
-    # The local bridge opens in tens of milliseconds from any network, while a
-    # phone on mobile data can stall on the FourHz handshake; it goes first and
-    # the hosted deployments remain as fallbacks.
-    stages = ([('bridge', bridge)] if bridge else []) + [('fourhz', config) for config in configs]
+    # Hosted deployments first; the local bridge is the last resort.
+    stages = [('fourhz', config) for config in configs] + ([('bridge', bridge)] if bridge else [])
     while stage < len(stages):
         kind, payload = stages[stage]
         if kind == 'bridge':
