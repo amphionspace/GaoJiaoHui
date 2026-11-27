@@ -85,13 +85,15 @@ const noteFields = (journal, data) => {
   if (data.generation !== 'model' || !noteText?.trim() || !data.message?.trim() || !Array.isArray(data.keywords)) {
     throw new Error('回信内容不完整，完整讲述已保留，请重新整理。')
   }
-  // English needs roughly three times the characters for the same content.
-  const messageLimit = journal.language === 'en' ? 160 : 50
+  // Follow the note's own language: the booth may speak Chinese in the EN UI.
+  const noteLanguage = data.language || journal.language
+  const messageLimit = noteLanguage === 'en' ? 160 : 50
   if (Array.from(data.message).length > messageLimit) {
     throw new Error('这次回信太长，完整讲述已保留，请重新整理。')
   }
   return { ...journal, noteText, summary: noteText, messageToSelf: data.message, takeaway: data.takeaway || '',
     keywords: data.keywords, generation: 'model', textModel: data.model, sketchPrompt: data.sketch_prompt || '',
+    language: noteLanguage,
     reviewed: data.reviewed !== false, sessionId: data.session_id || journal.sessionId || '' }
 }
 

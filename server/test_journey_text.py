@@ -46,12 +46,13 @@ class JourneyTextTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_english_request_selects_english_prompt_and_accepts_longer_keywords(self):
         calls = []
+        transcript = "I saw a robot at the fair. My father has trouble carrying things, so I want to know if it can help him."
         note = {
             "summary": "I want a robot to help my father carry things. I need to know if it can.",
             "message": "You saw your father's tired hands.",
             "keywords": ["father", "robot", "future care"],
             "takeaway": "You saw your father's tired hands.",
-            "anchors": ["爸爸搬东西很吃力"],
+            "anchors": ["My father has trouble carrying things"],
         }
 
         def handler(request):
@@ -60,9 +61,9 @@ class JourneyTextTests(unittest.IsolatedAsyncioTestCase):
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         with patch.object(journey_text, "configuration", return_value=CONFIG), patch.object(journey_text.httpx, "AsyncClient", return_value=client):
-            result = await journey_text.compose(journey_text.ComposeRequest(transcript=RAW, topic="product", language="en"))
+            result = await journey_text.compose(journey_text.ComposeRequest(transcript=transcript, topic="product", language="en"))
         source = json.loads(calls[0]["messages"][1]["content"])
-        self.assertEqual(source["transcript"], RAW)
+        self.assertEqual(source["transcript"], transcript)
         self.assertEqual(source["topic"], journey_text.TOPICS_EN["product"])
         self.assertIn("Write all user-facing fields in English", calls[1]["messages"][-1]["content"])
         self.assertEqual(result["message"], note["message"])
@@ -317,6 +318,42 @@ class JourneyTextTests(unittest.IsolatedAsyncioTestCase):
                 self.assertLessEqual(len(result['message']), 50)
                 self.assertEqual(len(calls), overlong_call + 2)
                 self.assertIn('最多50', calls[-2]['messages'][-1]['content'])
+
+
+class SpokenLanguageTests(unittest.IsolatedAsyncioTestCase):
+    def test_chinese_speech_wins_over_the_english_interface(self):
+        self.assertEqual(journey_text.detect_language('我想在2036年和家人一起去看雪山，慢慢走。', 'en'), 'zh')
+
+    def test_english_speech_wins_over_the_chinese_interface(self):
+        self.assertEqual(journey_text.detect_language('I want to see the new product in the market.', 'zh'), 'en')
+
+    def test_short_input_falls_back_to_the_interface(self):
+        self.assertEqual(journey_text.detect_language('ok', 'en'), 'en')
+        self.assertEqual(journey_text.detect_language('', 'zh'), 'zh')
+
+    async def test_chinese_speech_in_the_english_ui_composes_a_chinese_note(self):
+        transcript = '我想在2036年和家人一起去看雪山，慢慢走，把一路的风景都记下来。'
+        reply = {"choices": [{"message": {"content": __import__('json').dumps({
+            'note_text': '我想在2036年和家人一起去看雪山。我们慢慢走，把一路的风景都记下来。',
+            'message': '你想和家人慢慢走，把一路的风景都记下来。那些路不用赶。',
+            'takeaway': '你想和家人慢慢走，把一路的风景都记下来。',
+            'keywords': ['雪山', '家人'],
+            'anchors': [transcript],
+            'sketch_prompt': '雪山前的一家人，慢慢走在路上。',
+        }, ensure_ascii=False)}}]}
+
+        def handler(request):
+            return httpx.Response(200, json=reply, request=request)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        request = journey_text.ComposeRequest(transcript=transcript, topic='future', language='en')
+        with patch.object(journey_text.httpx, 'AsyncClient', return_value=client):
+            notes = []
+            async for kind, note, config, session_id in journey_text.compose_notes(request, {
+                    'url': 'https://provider.test/chat', 'model': 'm', 'api_key': 'k'}):
+                notes.append((kind, note.note_text))
+        self.assertEqual([kind for kind, _ in notes], ['draft', 'final'])
+        self.assertIn('雪山', notes[-1][1])
 
 
 class EnglishNoteLimitTests(unittest.TestCase):

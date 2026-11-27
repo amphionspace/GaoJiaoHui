@@ -211,6 +211,23 @@ def normalize_note_payload(payload):
     return normalized
 
 
+CJK_CHAR = re.compile(r'[\u3400-\u9fff]')
+LATIN_CHAR = re.compile(r'[A-Za-z]')
+
+
+def detect_language(transcript, requested="zh"):
+    """Follow the speech, not the interface: a Chinese story in the EN UI
+    still gets a Chinese note, and an English story in the ZH UI an English one."""
+    text = str(transcript or '')
+    cjk = len(CJK_CHAR.findall(text))
+    latin = len(LATIN_CHAR.findall(text))
+    if cjk >= 4 and cjk * 2 >= latin:
+        return 'zh'
+    if latin >= 8 and cjk == 0:
+        return 'en'
+    return 'en' if requested == 'en' else 'zh'
+
+
 def has_one_to_three_complete_sentences(value, language="zh"):
     pattern = r"[^.!?]+[.!?]" if language == "en" else r"[^。！？!?]+[。！？!?]"
     ending = r"[.!?]$" if language == "en" else r"[。！？!?]$"
@@ -271,8 +288,9 @@ def parse_note(content, transcript, language="zh"):
     return note
 
 
-def public_note(note, config, session_id=""):
+def public_note(note, config, session_id="", language=""):
     return {"note_text": note.note_text, "summary": note.note_text, "message": note.message,
+            "language": language,
             "takeaway": note.takeaway, "keywords": note.keywords, "sketch_prompt": note.sketch_prompt,
             "generation": "model", "model": config["model"], "session_id": session_id}
 
@@ -394,7 +412,8 @@ def fallback_configuration():
 async def _compose_with(config, request, session_id, started, deadline):
     """One provider's generation + review; yields ("draft"|"final", note)."""
     headers = {"Authorization": "Bearer " + config["api_key"]} if config["api_key"] else {}
-    english = request.language == "en"
+    language = detect_language(request.transcript, request.language)
+    english = language == "en"
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT_EN if english else SYSTEM_PROMPT},
         {"role": "user", "content": json.dumps(
@@ -433,7 +452,7 @@ async def _compose_with(config, request, session_id, started, deadline):
                 raise HTTPException(502, detail={"code": code, "message": message, "upstream_status": status})
             try:
                 content = response.json()["choices"][0]["message"]["content"]
-                note = parse_note(content, request.transcript, request.language)
+                note = parse_note(content, request.transcript, language)
                 draft_ms = round((time.monotonic() - started) * 1000)
                 sessions.record_draft(session_id, request, note, draft_ms, config["model"])
                 metrics.event("compose_draft")
@@ -449,7 +468,7 @@ async def _compose_with(config, request, session_id, started, deadline):
                 })
                 if reviewed.status_code >= 400:
                     raise HTTPException(502, detail={"code": "text_review_failed", "message": "回信审校暂时不可用，讲述已保留，请重试。"})
-                reviewed_note = parse_note(reviewed.json()["choices"][0]["message"]["content"], request.transcript, request.language)
+                reviewed_note = parse_note(reviewed.json()["choices"][0]["message"]["content"], request.transcript, language)
                 sessions.record_final(session_id, reviewed_note, round((time.monotonic() - started) * 1000))
                 metrics.event("compose_final")
                 metrics.observe("compose_final_seconds", time.monotonic() - started)
@@ -518,7 +537,7 @@ async def compose(request: ComposeRequest):
         raise
     if final is None:
         raise HTTPException(502, detail={"code": "text_invalid_result", "message": "这次回信未通过内容检查，完整讲述已保留，请重新整理。"})
-    return public_note(final, config, session_id)
+    return public_note(final, config, session_id, detect_language(request.transcript, request.language))
 
 
 def stream_line(payload):
@@ -535,6 +554,7 @@ async def compose_stream(request: ComposeRequest):
     config = compose_configuration(request)
     session_id = session_id_for(request)
     started = time.monotonic()
+    language = detect_language(request.transcript, request.language)
 
     async def events():
         draft = None
@@ -545,16 +565,16 @@ async def compose_stream(request: ComposeRequest):
                 if kind == "draft":
                     draft = note
                     yield stream_line({"stage": "draft", "reviewed": False, "session_id": session_id,
-                                       **public_note(note, current, session_id)})
+                                       **public_note(note, current, session_id, language)})
                 else:
                     yield stream_line({"stage": "final", "reviewed": True, "session_id": session_id,
-                                       **public_note(note, current, session_id)})
+                                       **public_note(note, current, session_id, language)})
         except HTTPException as error:
             detail = error.detail
             if draft is not None and isinstance(detail, dict) and detail.get("code") == "text_review_failed":
                 metrics.event("compose_review_fallback")
                 yield stream_line({"stage": "final", "reviewed": False, "session_id": session_id,
-                                   "warning": "这次只完成了一轮整理，文字已保留。", **public_note(draft, current_config, session_id)})
+                                   "warning": "这次只完成了一轮整理，文字已保留。", **public_note(draft, current_config, session_id, language)})
             else:
                 code = detail.get("code", "") if isinstance(detail, dict) else ""
                 metrics.event("compose_error")
@@ -565,7 +585,7 @@ async def compose_stream(request: ComposeRequest):
             if draft is not None:
                 metrics.event("compose_review_fallback")
                 yield stream_line({"stage": "final", "reviewed": False, "session_id": session_id,
-                                   "warning": "复核超时，已保留当前文字。", **public_note(draft, current_config, session_id)})
+                                   "warning": "复核超时，已保留当前文字。", **public_note(draft, current_config, session_id, language)})
             else:
                 metrics.event("compose_error")
                 metrics.error("/api/journey/compose/stream", 504, "text_timeout")
@@ -575,7 +595,7 @@ async def compose_stream(request: ComposeRequest):
             if draft is not None:
                 metrics.event("compose_review_fallback")
                 yield stream_line({"stage": "final", "reviewed": False, "session_id": session_id,
-                                   "warning": "复核暂时中断，已保留当前文字。", **public_note(draft, current_config, session_id)})
+                                   "warning": "复核暂时中断，已保留当前文字。", **public_note(draft, current_config, session_id, language)})
             else:
                 metrics.event("compose_error")
                 metrics.error("/api/journey/compose/stream", 502, "text_connection_failed")
