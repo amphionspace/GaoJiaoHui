@@ -26,6 +26,10 @@ CONFIG_FILE = Path(__file__).resolve().parents[1] / ".env.journey.json"
 # The provider counts internal reasoning toward this budget as well as the JSON.
 MAX_COMPLETION_TOKENS = 4096
 MAX_REPLY_CHARS = 50
+# English needs far more characters than Chinese for the same content.
+NOTE_LIMITS = {'zh': 80, 'en': 220}
+MESSAGE_LIMITS = {'zh': MAX_REPLY_CHARS, 'en': 160}
+TAKEAWAY_LIMITS = {'zh': MAX_REPLY_CHARS, 'en': 160}
 # Provider-side overload responses worth one short retry (503 "service is too busy").
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 TOPICS = {"future": "和2036对话：十年后对科技、生活的想象和期待，那时希望自己在做什么", "product": "最惊喜的产品", "idea": "一个新想法", "story": "今天的故事"}
@@ -117,15 +121,15 @@ Return one JSON object only, with note_text, message, takeaway, keywords, anchor
 note_text: the body of the final keepsake under “A letter to the future”. You are an editor who preserves the speaker's personal expression. Lightly polish and distill the full transcript in the speaker's first person so it still feels like what they meant, only clearer.
 Keep the main imagined future, wish, or question; concrete people, objects, actions, settings, functions, reasons, and the person they want to help. Remove filler words, repetitions, irrelevant setup, test phrases, and process language. If the transcript gives no reason or emotion, do not invent one. Preserve the speaker's voice, humor, curiosity, seriousness, or hesitation.
 Do not add facts, motivations, emotions, life meaning, scenes, or future results. Preserve negations, limits, conditions, uncertainty, “might”, “if”, “want to try”, “worry”, and “not decided yet”; never turn them into certainty. Do not guess unclear names or facts. Do not turn speech into a slogan, poem, generic reflection, or marketing copy.
-Prefer two complete, connected sentences, usually 40–70 characters and at most 80 characters; use one or three only when the source requires it. Short source speech may be shorter; never pad it. Output only the body: no title, salutation, sign-off, date, label, quotation marks, bullets, explanation, analysis, or alternatives.
+Prefer two complete, connected sentences, usually 120–200 characters and at most 220 characters; use one or three only when the source requires it. Short source speech may be shorter; never pad it. Output only the body: no title, salutation, sign-off, date, label, quotation marks, bullets, explanation, analysis, or alternatives.
 
 note_text example: transcript “I saw a robot. At first it was just exciting, but then I thought about how hard it is for my father to carry things. I want to know whether it can really help.”
 Write: “When I saw the robot, I thought first of how hard it is for my father to carry things. I want to know whether it can really help.”
 
 Never add disclaimers or meta commentary such as “AI-generated”, “synthetic voice”, “fictional dialogue”, “for demonstration”, or “this is a simulation”; write only the character's own words.
-message: imagine a private call from 2036 to today. Use “I” for the caller and “you” for today's speaker. The first sentence must immediately name the specific person, detail, standard, or wish that matters here. Speak like someone close who understood the point, not like a reviewer, therapist, or customer-support bot. Add one grounded sentence of warmth or courage only when the transcript supports it. Do not repeat the summary, lead with hello, identify yourself, say “I heard you”, praise personality, diagnose feelings, promise technology will work, or add an action plan unless asked. Keep it natural and speakable, usually 25–45 characters, never over 50 characters including punctuation. Write complete sentences; never truncate with an ellipsis.
+message: imagine a private call from 2036 to today. Use “I” for the caller and “you” for today's speaker. The first sentence must immediately name the specific person, detail, standard, or wish that matters here. Speak like someone close who understood the point, not like a reviewer, therapist, or customer-support bot. Add one grounded sentence of warmth or courage only when the transcript supports it. Do not repeat the summary, lead with hello, identify yourself, say “I heard you”, praise personality, diagnose feelings, promise technology will work, or add an action plan unless asked. Keep it natural and speakable, usually 40–120 characters, never over 160 characters including punctuation. Write complete sentences; never truncate with an ellipsis.
 
-takeaway: copy one complete sentence from message, 12–50 characters, preferably the sentence that holds the specific care or wish. Return an empty string if no sentence qualifies.
+takeaway: copy one complete sentence from message, 12–160 characters, preferably the sentence that holds the specific care or wish. Return an empty string if no sentence qualifies.
 keywords: choose 2–3 concise keywords from the transcript's meaning, each 2–20 characters. Do not pad with generic words.
 anchors: copy 1–3 continuous excerpts from the transcript, each at most 80 characters. They are evidence only and are not shown to the user.
 sketch_prompt: turn the most concrete, visual expectation in the full transcript and note_text into a single image description, 30–100 characters and at most 180 characters. Name visible people, technology, setting, and action. Use third-person description. Do not write style instructions, inner feelings, abstract hopes, text, labels, logos, tickets, or a complete keepsake. Do not add technology the user did not mention. When the transcript is product or page feedback rather than a future wish, describe the feedback subject only when it is genuinely visual; never invent a wish.
@@ -138,7 +142,7 @@ Call: “You want every sentence to have somewhere to land. That awkward pause w
 """
 REVIEW_PROMPT_EN = """Perform a final factual and conversational review. Return complete JSON and preserve the transcript's meaning.
 Keep the concrete, intimate part of the reply. Do not turn a warm, specific response into a summary, a support ticket, or generic encouragement.
-   The first sentence must address the specific concern immediately. The reply must add understanding beyond repetition, avoid personality praise, diagnoses, future guarantees, and unsolicited tasks. Remove filler words, greetings, self-introductions, and “I heard you”. Keep message under 50 characters and takeaway as an exact complete sentence from message. Keep anchors as exact continuous transcript excerpts. Prefer two complete connected sentences for note_text, usually 40–70 characters and at most 80; use one or three only when needed. Output only the note body without a title, label, quotation marks, bullets, explanation, or alternatives. Keep sketch_prompt as one concrete visible scene and do not describe the keepsake layout. Do not turn product or page feedback into a future wish. Write all user-facing fields in English."""
+   The first sentence must address the specific concern immediately. The reply must add understanding beyond repetition, avoid personality praise, diagnoses, future guarantees, and unsolicited tasks. Remove filler words, greetings, self-introductions, and “I heard you”. Keep message under 160 characters and takeaway as an exact complete sentence from message. Keep anchors as exact continuous transcript excerpts. Prefer two complete connected sentences for note_text, usually 120–200 characters and at most 220; use one or three only when needed. Output only the note body without a title, label, quotation marks, bullets, explanation, or alternatives. Keep sketch_prompt as one concrete visible scene and do not describe the keepsake layout. Do not turn product or page feedback into a future wish. Write all user-facing fields in English."""
 
 
 class ComposeRequest(BaseModel):
@@ -149,9 +153,10 @@ class ComposeRequest(BaseModel):
 
 
 class ComposedNote(BaseModel):
-    note_text: str = Field(min_length=1, max_length=80)
-    message: str = Field(min_length=1, max_length=MAX_REPLY_CHARS)
-    takeaway: str = Field(default="", max_length=200)
+    # Generous schema limits; parse_note enforces the per-language budget.
+    note_text: str = Field(min_length=1, max_length=400)
+    message: str = Field(min_length=1, max_length=400)
+    takeaway: str = Field(default="", max_length=400)
     keywords: list[str] = Field(min_length=1, max_length=3)
     anchors: list[str] = Field(min_length=1, max_length=3)
     sketch_prompt: str = Field(default='', max_length=180)
@@ -185,12 +190,14 @@ async def text_status():
     return {"configured": bool(config["url"] and config["model"]), "model": config["model"]}
 
 
-def receipt_quote(message, proposed):
+def receipt_quote(message, proposed, language="zh"):
     # Only print a whole sentence from the reviewed reply. A model's paraphrased
     # quote must not invalidate an otherwise usable note or invent a second reply.
-    sentences = re.findall(r'[^。！？!?]+[。！？!?]?', message)
+    pattern = r'[^.!?]+[.!?]?' if language == "en" else r'[^。！？!?]+[。！？!?]?'
+    limit = TAKEAWAY_LIMITS.get(language, MAX_REPLY_CHARS)
+    sentences = re.findall(pattern, message)
     candidates = [sentence.strip() for sentence in sentences
-                  if 12 <= len(sentence.strip()) <= MAX_REPLY_CHARS and not re.search(r'我是|是我[，,]|这通电话', sentence)]
+                  if 12 <= len(sentence.strip()) <= limit and not re.search(r'我是|是我[，,]|这通电话', sentence)]
     return proposed if proposed in candidates else (candidates[-1] if candidates else '')
 
 
@@ -237,6 +244,10 @@ def parse_note(content, transcript, language="zh"):
     note.message = note.message.strip()
     if not note.note_text or not note.message:
         raise ValueError("摘要和回信不能为空")
+    if len(note.note_text) > NOTE_LIMITS.get(language, NOTE_LIMITS['zh']):
+        raise ValueError("便签正文过长")
+    if len(note.message) > MESSAGE_LIMITS.get(language, MESSAGE_LIMITS['zh']):
+        raise ValueError("回信过长")
     if not has_one_to_three_complete_sentences(note.note_text, language):
         raise ValueError("便签正文必须是1至3句完整话")
     if note.message.startswith("未来的我"):
@@ -245,7 +256,7 @@ def parse_note(content, transcript, language="zh"):
         raise ValueError("摘要和回信仍含口癖")
     if note.message == note.note_text or note.message == transcript.strip():
         raise ValueError("回信不能重复摘要或原文")
-    note.takeaway = receipt_quote(note.message, note.takeaway.strip())
+    note.takeaway = receipt_quote(note.message, note.takeaway.strip(), language)
     if any(phrase in note.message for phrase in DISALLOWED_MESSAGE_PHRASES):
         raise ValueError("回信包含万能鼓励或书面产品评审腔，请用贴合这次讲述的自然口语回应")
     note.keywords = [word.strip() for word in note.keywords]
@@ -254,7 +265,8 @@ def parse_note(content, transcript, language="zh"):
         raise ValueError("关键词必须简短")
     if len(set(note.keywords)) != len(note.keywords):
         raise ValueError("关键词不能重复")
-    if any(not anchor.strip() or len(anchor) > 80 or anchor not in transcript for anchor in note.anchors):
+    anchor_limit = 200 if language == "en" else 80
+    if any(not anchor.strip() or len(anchor) > anchor_limit or anchor not in transcript for anchor in note.anchors):
         raise ValueError("回信依据必须原样出自完整讲述")
     return note
 
@@ -272,7 +284,7 @@ def session_id_for(request):
 
 def retry_prompt(error, english):
     if english:
-        return ("Previous output failed validation: " + str(error)[:300] + ". Re-read the full transcript and return valid JSON. Prefer two complete connected sentences for note_text, usually 40–70 characters and at most 80; use one or three only when needed. Output only the note body without a title, label, quotation marks, bullets, explanation, or alternatives. Keep message under 50 characters including punctuation, rewrite complete sentences instead of truncating, remove fillers, respond to the specific concern immediately, do not greet, praise personality, or repeat the transcript. takeaway must be copied exactly from one complete message sentence. anchors must be exact continuous excerpts from the transcript. sketch_prompt must be one concrete visible scene and must not turn product feedback into a future wish. Write all user-facing fields in English.")
+        return ("Previous output failed validation: " + str(error)[:300] + ". Re-read the full transcript and return valid JSON. Prefer two complete connected sentences for note_text, usually 120–200 characters and at most 220; use one or three only when needed. Output only the note body without a title, label, quotation marks, bullets, explanation, or alternatives. Keep message under 50 characters including punctuation, rewrite complete sentences instead of truncating, remove fillers, respond to the specific concern immediately, do not greet, praise personality, or repeat the transcript. takeaway must be copied exactly from one complete message sentence. anchors must be exact continuous excerpts from the transcript. sketch_prompt must be one concrete visible scene and must not turn product feedback into a future wish. Write all user-facing fields in English.")
     return ("上次结果未通过检查：" + str(error)[:300] + "。请重新核对全文，严格按系统要求返回合法JSON：note_text优先写成两句完整连贯的话，通常40至70字、最多80字，必要时才用1句或3句；只输出正文，不要标题、称呼、落款、日期、标签、引号、要点、解释或多个版本。保留原文具体细节、条件、否定和不确定性，不新增信息。message最多50个字符（含标点），超长就重写完整短句，不能截断。清除口癖，以未来的自己回应今天的你，第一句直接回应具体牵挂，不问好、不夸人格、不复读原文。takeaway原样取message一句完整话。anchors必须是原文中真实的连续片段，sketch_prompt必须是具体可见的单幅场景；如果原文只是产品或页面反馈，不要把它写成未来愿望。")
 
 

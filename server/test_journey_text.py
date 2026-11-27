@@ -319,6 +319,39 @@ class JourneyTextTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('最多50', calls[-2]['messages'][-1]['content'])
 
 
+class EnglishNoteLimitTests(unittest.TestCase):
+    TRANSCRIPT = ('Can you explain to me what is the future about the new product in the market, Kar?')
+
+    def payload(self, note_text, message):
+        import json
+        return json.dumps({
+            'note_text': note_text,
+            'message': message,
+            'takeaway': 'You want to know where Kar sees that new product going.',
+            'keywords': ['new product', 'future', 'Kar'],
+            'anchors': [self.TRANSCRIPT],
+            'sketch_prompt': 'Two people talking about a new product on a table.',
+        }, ensure_ascii=False)
+
+    def test_a_natural_english_note_passes_the_limits(self):
+        note = journey_text.parse_note(self.payload(
+            "I want to understand what the future holds for the new product that's in the market. "
+            "I'm asking Kar to explain it to me.",
+            'You want to know where Kar sees that new product going. Asking is how you start to see it.',
+        ), self.TRANSCRIPT, 'en')
+        self.assertGreater(len(note.note_text), 80)
+        self.assertGreater(len(note.message), 50)
+        self.assertTrue(note.takeaway)
+
+    def test_chinese_limits_still_apply(self):
+        with self.assertRaises(ValueError):
+            journey_text.parse_note(self.payload('很长的正文。' * 20, '短回信。'), '我想去看雪山。', 'zh')
+
+    def test_english_note_over_the_new_limit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            journey_text.parse_note(self.payload('word ' * 60 + 'end.', 'Short reply here.'), self.TRANSCRIPT, 'en')
+
+
 class BalanceProbeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         journey_text._primary_status.update(at=0.0, value=None)
