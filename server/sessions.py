@@ -72,6 +72,7 @@ def image_dir():
 COLUMNS = {
     'visitor_no': 'INTEGER',
     'sketch': 'TEXT',
+    'receipt': 'TEXT',
     'status': "TEXT NOT NULL DEFAULT 'draft'",
     'error_code': "TEXT NOT NULL DEFAULT ''",
     'printed_at': 'TEXT',
@@ -197,10 +198,11 @@ def _delete_audio_files(session_id):
 
 
 def _delete_image(session_id):
-    try:
-        (image_dir() / f'{session_id}.png').unlink()
-    except OSError:
-        pass
+    for name in (f'{session_id}.png', f'{session_id}.receipt.png'):
+        try:
+            (image_dir() / name).unlink()
+        except OSError:
+            pass
 
 
 def _trim_audio(connection):
@@ -333,17 +335,54 @@ def save_image(session_id, raw):
         return False
 
 
+def save_receipt(session_id, raw):
+    """Keep the whole 80x170 note as rendered by the browser."""
+    if not enabled() or not raw or len(raw) > 16 * 1024 * 1024:
+        return False
+    if not SESSION_ID.fullmatch(session_id or '') or not raw.startswith(b'\x89PNG\r\n\x1a\n'):
+        return False
+    directory = image_dir()
+    path = directory / f'{session_id}.receipt.png'
+    try:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        with _connection() as connection:
+            visitor_no, created = _visitor(connection, session_id)
+            connection.execute("""
+                INSERT INTO sessions (id, created_at, visitor_no, status, receipt)
+                VALUES (?, ?, ?, 'pending', ?)
+                ON CONFLICT(id) DO UPDATE SET receipt = excluded.receipt
+            """, (session_id, created, visitor_no, str(path)))
+        return True
+    except Exception as error:  # noqa: BLE001 - storage must never break the note
+        print('session receipt not stored:', type(error).__name__)
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return False
+
+
+def receipt_path(session_id):
+    return _image_path(session_id, 'receipt')
+
+
 def image_path(session_id):
+    return _image_path(session_id, 'sketch')
+
+
+def _image_path(session_id, column):
     if not SESSION_ID.fullmatch(session_id or ''):
         return ''
     try:
         with _connection() as connection:
-            row = connection.execute('SELECT sketch FROM sessions WHERE id = ?', (session_id,)).fetchone()
+            row = connection.execute(f'SELECT {column} FROM sessions WHERE id = ?', (session_id,)).fetchone()
     except Exception:  # noqa: BLE001
         return ''
-    if not row or not row['sketch']:
+    if not row or not row[column]:
         return ''
-    path = Path(row['sketch'])
+    path = Path(row[column])
     try:
         if path.resolve().parent != image_dir().resolve() or not path.is_file():
             return ''
@@ -429,6 +468,7 @@ def _row(row):
         'has_sample': bool(row['sample_audio']) if 'sample_audio' in keys else False,
         'has_reply': bool(row['reply_audio']) if 'reply_audio' in keys else False,
         'has_sketch': bool(row['sketch']) if 'sketch' in keys else False,
+        'has_receipt': bool(row['receipt']) if 'receipt' in keys else False,
         'reply_seconds': row['reply_seconds'] if 'reply_seconds' in keys else None,
         'has_visit': bool(row['visit_audio']) if 'visit_audio' in keys else False,
         'visit_seconds': row['visit_seconds'] if 'visit_seconds' in keys else None,
@@ -470,6 +510,8 @@ def summary():
                 'OR visit_audio IS NOT NULL').fetchone()[0],
             'sketches': connection.execute(
                 'SELECT COUNT(*) FROM sessions WHERE sketch IS NOT NULL').fetchone()[0],
+            'receipts': connection.execute(
+                'SELECT COUNT(*) FROM sessions WHERE receipt IS NOT NULL').fetchone()[0],
         })
     return base
 

@@ -239,3 +239,31 @@ class SketchStorageTests(unittest.TestCase):
         with patch.dict('os.environ', self.env):
             self.assertFalse(sessions.save_image('b' * 32, b'not an image'))
             self.assertEqual(sessions.image_path('b' * 32), '')
+
+
+class ReceiptStorageTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        base = Path(self.directory.name)
+        self.env = {
+            'JOURNEY_SESSION_LOG': '1', 'JOURNEY_SESSION_DB': str(base / 'sessions.sqlite3'),
+            'JOURNEY_SESSION_AUDIO_DIR': str(base / 'audio'),
+            'JOURNEY_SESSION_IMAGE_DIR': str(base / 'images'),
+        }
+
+    def test_receipt_image_is_stored_next_to_the_session(self):
+        png = b'\x89PNG\r\n\x1a\n' + b'\x00' * 64
+        with patch.dict('os.environ', self.env):
+            sessions.record_draft('c' * 32, REQUEST, NOTE, 900, 'model')
+            self.assertTrue(sessions.save_receipt('c' * 32, png))
+            path = sessions.receipt_path('c' * 32)
+            self.assertTrue(path.endswith('.receipt.png'))
+            self.assertTrue(Path(path).is_file())
+            row = sessions.recent()[0]
+            self.assertTrue(row['has_receipt'])
+            self.assertEqual(sessions.summary()['receipts'], 1)
+            sessions.clear()
+            self.assertFalse(Path(path).exists())

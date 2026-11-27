@@ -49,7 +49,7 @@ async function dashboard(response = stats()) {
         return { ok: true, json: async () => fixture.response }
       }
       if (url === '/api/admin/summary') return { ok: true, json: async () => ({ today: 3, total: 9, generated: 8 }) }
-      if (url === '/api/admin/sessions?limit=30') return { ok: true, json: async () => ({ enabled: true, total: 0, retention_days: 7, sessions: [] }) }
+      if (url === '/api/admin/sessions?limit=50&offset=0') return { ok: true, json: async () => ({ enabled: true, total: 0, retention_days: 7, sessions: [] }) }
       throw new Error('Unexpected request: ' + url)
     },
   })
@@ -61,7 +61,7 @@ async function dashboard(response = stats()) {
 
 test('admin boots its script and keeps an empty error bar visible', async () => {
   const { elements, requests } = await dashboard()
-  assert.deepEqual(requests, ['/api/admin/stats', '/api/admin/sessions?limit=30', '/api/admin/summary'])
+  assert.deepEqual(requests, ['/api/admin/stats', '/api/admin/sessions?limit=50&offset=0', '/api/admin/summary'])
   assert.match(elements.get('meta-updated').textContent, /更新于 2026-11-02/)
   assert.match(elements.get('summary').innerHTML, /今日体验/)
   assert.match(elements.get('requests').innerHTML, /请求总数<\/span><b>7/)

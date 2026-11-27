@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { store, dlog } from '../core/store.js'
 import { toggleLocale } from '../core/i18n.js'
 import { endingIntent, createJourneyJournal, composeJourneyJournal, illustrateJourneyJournal } from '../core/journey.js'
+import { toPng } from 'html-to-image'
 import { JourneyRecorder, JourneySound, JourneyVoice, cleanJourneyVoices, voiceFailureMessage, prefetchAsrSession } from '../core/journeyAudio.js'
 import { warmSpeechDetector, releasePreparedDetector } from '../core/journeySpeech.js'
 import JourneyIcon from './JourneyIcon.vue'
@@ -386,10 +387,32 @@ async function togglePlayback() {
   else { try { await sound.resume(); audioPaused.value = false } catch { error.value = '播放未能继续，请重新播放。' } }
 }
 let printStartedAt = 0
+const capturedReceipts = new Set()
+async function captureReceipt(sessionId) {
+  if (!sessionId || !store.sessionLog || capturedReceipts.has(sessionId)) return
+  const node = document.getElementById('journey-print-root')
+  if (!node) return
+  capturedReceipts.add(sessionId)
+  const previous = node.getAttribute('style')
+  node.setAttribute('style', 'display:flex;position:fixed;left:-200mm;top:0;width:80mm;height:170mm;align-items:center;justify-content:center;background:#f4ebdf')
+  try {
+    const image = await toPng(node, { pixelRatio: 2, backgroundColor: '#f4ebdf', cacheBust: true })
+    await fetch('/api/journey/snapshot', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, image }),
+    })
+  } catch {
+    capturedReceipts.delete(sessionId)
+  } finally {
+    if (previous === null) node.removeAttribute('style')
+    else node.setAttribute('style', previous)
+  }
+}
 async function printJournal() {
   if (!journal.value?.summary || stage.value === 'printing' || imageBusy.value || notePending.value) return
   const id = session, printText = journal.value.noteText || journal.value.summary
   stopPlayback(); stopRecording(); stage.value = 'printing'; printReturned.value = false
+  captureReceipt(journal.value.sessionId || visitSession)
   printStartedAt = performance.now()
   await nextTick()
   try {

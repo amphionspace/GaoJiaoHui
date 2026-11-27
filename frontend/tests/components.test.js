@@ -87,6 +87,7 @@ async function mount(name, options = {}) {
     else if (specifier.endsWith('/journeyAudio.js')) values = { JourneySound: Sound, JourneyVoice: Voice, JourneyRecorder: Recorder, cleanJourneyVoices() {}, voiceFailureMessage: e => e.message,
       prefetchAsrSession: () => { prefetches.count++; return Promise.resolve('') } }
     else if (specifier.endsWith('/journeySpeech.js')) values = { warmSpeechDetector: () => Promise.resolve(), releasePreparedDetector() {} }
+    else if (specifier === 'html-to-image') values = { toPng: async () => 'data:image/png;base64,dGVzdA==' }
     else values = { default: {} }
     return new vm.SyntheticModule(Object.keys(values), function () { for (const [k, v] of Object.entries(values)) this.setExport(k, v) }, { context })
   })

@@ -684,6 +684,24 @@ async def journey_print(event: PrintEvent):
     return {'printed': sessions.mark_printed(event.session_id)}
 
 
+class JourneySnapshot(BaseModel):
+    session_id: str = Field(default='', max_length=64, pattern=r'^[0-9a-zA-Z-]*$')
+    image: str = Field(default='', max_length=24 * 1024 * 1024)
+
+
+@app.post('/api/journey/snapshot', dependencies=[Depends(compose_access)])
+async def journey_snapshot(payload: JourneySnapshot):
+    head, _, encoded = payload.image.partition(',')
+    if not head.startswith('data:image/png;base64') or not encoded:
+        raise HTTPException(400, '请提供 PNG 图片。')
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError):
+        raise HTTPException(400, '图片数据无效。') from None
+    stored = sessions.save_receipt(payload.session_id, raw)
+    return {'stored': stored}
+
+
 @app.post('/api/journey/audio', dependencies=[Depends(compose_access)])
 async def journey_audio(audio_file: APIUploadFile = File(...), session_id: str = Form('')):
     raw = await audio_file.read(8 * 1024 * 1024 + 1)
@@ -715,6 +733,14 @@ async def admin_session_sketch(session_id: str):
     path = sessions.image_path(session_id)
     if not path:
         raise HTTPException(404, '没有保存这段插画。')
+    return FileResponse(path, media_type='image/png', headers={'Cache-Control': 'no-store'})
+
+
+@app.get('/api/admin/sessions/{session_id}/receipt', dependencies=[Depends(require_admin)])
+async def admin_session_receipt(session_id: str):
+    path = sessions.receipt_path(session_id)
+    if not path:
+        raise HTTPException(404, '没有保存这张手记图。')
     return FileResponse(path, media_type='image/png', headers={'Cache-Control': 'no-store'})
 
 
@@ -850,6 +876,8 @@ button:hover{border-color:var(--acc);color:var(--acc)}
 .metric-value.bad{color:var(--bad)}
 .session-body audio{width:100%;max-width:420px;height:34px}
 .session-sketch{display:block;width:140px;height:auto;border:1px solid var(--line);border-radius:6px;background:#fff}
+.session-receipt{display:block;width:150px;height:auto;border:1px solid var(--line);border-radius:6px;background:#fff}
+.session-more{padding:12px 0 4px;text-align:center}
 .session-sketch-link{display:inline-block}
 .s-user{font-weight:600;font-size:12px}
 .session-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:10px}
@@ -1052,7 +1080,7 @@ function renderSessions(data) {
     const meta = failed
       ? '未生成 · ' + esc(item.error_code || '失败')
       : item.transcript_chars + ' 字 · 草稿 ' + ms(item.draft_ms) + ' · 终版 ' + ms(item.final_ms) +
-        (item.reviewed ? ' · 已审校' : ' · 未审校') + (item.has_sketch ? ' · 有插画' : '') + (item.printed_at ? ' · 已打印' : '')
+        (item.reviewed ? ' · 已审校' : ' · 未审校') + (item.has_receipt ? ' · 有整图' : '') + (item.has_sketch ? ' · 有插画' : '') + (item.printed_at ? ' · 已打印' : '')
     return '<details class="session" data-id="' + esc(item.id) + '"' + (openSessions.has(item.id) ? ' open' : '') + '>' +
       '<summary><span class="s-user">' + esc(who) + '</span>' +
       '<span class="s-time">' + esc(item.created_at.slice(5)) + '</span>' +
@@ -1067,6 +1095,10 @@ function renderSessions(data) {
         (item.has_visit ? audioTag(item, 'visit', '访客录音' + (item.visit_seconds ? '（' + item.visit_seconds + ' 秒）' : '')) : '') +
         (item.has_sample ? audioTag(item, 'sample', '访客参考音') : '') +
         (item.has_reply ? audioTag(item, 'reply', '回信语音' + (item.reply_seconds ? '（' + item.reply_seconds + ' 秒）' : '')) : '') +
+        (item.has_receipt ? '<div><h4>手记整图</h4><a class="session-sketch-link" href="/api/admin/sessions/' +
+          encodeURIComponent(item.id) + '/receipt" target="_blank" rel="noopener" title="打开原图">' +
+          '<img class="session-receipt" src="/api/admin/sessions/' + encodeURIComponent(item.id) +
+          '/receipt" alt="本次手记整图" loading="lazy" /></a></div>' : '') +
         (item.has_sketch ? '<div><h4>插画</h4><a class="session-sketch-link" href="/api/admin/sessions/' +
           encodeURIComponent(item.id) + '/sketch" target="_blank" rel="noopener" title="打开原图">' +
           '<img class="session-sketch" src="/api/admin/sessions/' + encodeURIComponent(item.id) +
@@ -1074,19 +1106,30 @@ function renderSessions(data) {
         '<div><h4>元信息</h4><p>模型 ' + esc(item.model || '-') + ' · 语言 ' + esc(item.language || '-') +
           (item.printed_at ? ' · 打印于 ' + esc(item.printed_at) : '') + '</p></div>' +
       '</div></details>'
-  }).join('')
+  }).join('') + (data.sessions.length < sessionTotal
+    ? '<div class="session-more"><button type="button" id="session-more">加载更多（已显示 ' +
+      data.sessions.length + ' / 共 ' + sessionTotal + ' 条）</button></div>'
+    : '')
   document.querySelectorAll('details.session').forEach(node => {
     node.addEventListener('toggle', () => {
       if (node.open) openSessions.add(node.dataset.id)
       else openSessions.delete(node.dataset.id)
     })
   })
+  const moreButton = document.getElementById('session-more')
+  if (moreButton) moreButton.addEventListener('click', () => loadSessions(true), { once: true })
 }
-async function loadSessions() {
+const SESSION_PAGE = 50
+let sessionItems = [], sessionTotal = 0
+async function loadSessions(more = false) {
   try {
-    const response = await fetch('/api/admin/sessions?limit=30', { cache: 'no-store' })
+    const offset = more ? sessionItems.length : 0
+    const response = await fetch('/api/admin/sessions?limit=' + SESSION_PAGE + '&offset=' + offset, { cache: 'no-store' })
     if (!response.ok) return
-    renderSessions(await response.json())
+    const data = await response.json()
+    sessionItems = more ? sessionItems.concat(data.sessions || []) : (data.sessions || [])
+    sessionTotal = Number(data.total) || sessionItems.length
+    renderSessions({ ...data, sessions: sessionItems })
   } catch (error) { /* keep the previous list on a transient failure */ }
 }
 async function refresh() {
@@ -1102,7 +1145,7 @@ $('refresh').addEventListener('click', refresh)
 $('session-clear').addEventListener('click', async () => {
   if (!confirm('清空全部会话记录？此操作不可撤销。')) return
   const response = await fetch('/api/admin/sessions/clear', { method: 'POST' })
-  if (response.ok) { openSessions.clear(); loadSessions() }
+  if (response.ok) { openSessions.clear(); sessionItems = []; sessionTotal = 0; loadSessions() }
 })
 refresh(); loadSessions(); loadSummary()
 setInterval(() => { if (!document.hidden) { refresh(); loadSessions(); loadSummary() } }, 10000)
