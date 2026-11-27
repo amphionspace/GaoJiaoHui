@@ -535,7 +535,7 @@ onBeforeUnmount(() => {
           <div ref="transcriptViewport" class="transcript-viewport" role="log" aria-label="完整讲述记录" aria-live="polite" aria-atomic="false" tabindex="0" @scroll="trackTranscriptScroll"><p>{{ text || (audioCaptured ? '已收到声音，正在识别…' : '第一句话，会从这里开始。') }}</p></div>
           <button v-if="!followTranscript" class="transcript-latest journey-link" @click="showLatestTranscript"><JourneyIcon name="ChevronDown" :size="16" />回到最新一句</button>
         </div>
-        <div v-if="journal?.messageToSelf && stage === 'generating'" class="call-pending-reply"><span>给你的回信</span><p>{{ journal.messageToSelf }}</p></div>
+        <div v-if="journal?.messageToSelf && stage === 'generating'" class="call-pending-reply"><span>给你的回信</span><p :dir="journal?.language === 'ar' ? 'rtl' : 'ltr'">{{ journal.messageToSelf }}</p></div>
       </div>
       <footer class="call-dock" :inert="connecting">
         <p class="dock-note" role="status">{{ notice || (autoFinishSeconds ? `${autoFinishSeconds} 秒后开始整理，继续说话可接着记录。` : stage === 'generating' ? '正在处理 · 麦克风已关闭' : '只记录你此刻想留下的话') }}</p>
@@ -551,7 +551,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
     <div v-else-if="['preview', 'playback', 'printing'].includes(stage) && journal" class="journey-result">
-      <div v-if="journal.messageToSelf" class="reply-card"><span>{{ playing && !audioPaused ? '正在播放回信' : '来自未来的一句话' }}</span><p>{{ journal.messageToSelf }}</p></div>
+      <div v-if="journal.messageToSelf" class="reply-card"><span>{{ playing && !audioPaused ? '正在播放回信' : '来自未来的一句话' }}</span><p :dir="journal.language === 'ar' ? 'rtl' : 'ltr'">{{ journal.messageToSelf }}</p></div>
       <div v-if="journal.summary" class="journey-paper-preview"><JourneyReceipt :journal="journal" :image-error="imageIssue" :image-busy="imageBusy" @retry-image="retryIllustration" /></div>
       <div v-else class="journey-recovery"><h2>讲述已保留</h2><p>回信还没准备好，你可以直接重试。</p><div class="recovery-transcript" tabindex="0" aria-label="已保留的完整讲述">{{ journal.originalText }}</div></div>
       <div class="journey-result-content">

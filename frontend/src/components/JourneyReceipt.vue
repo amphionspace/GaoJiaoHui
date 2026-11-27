@@ -5,7 +5,8 @@ import { receiptParagraphs } from '../core/receiptLayout.js'
 const props = defineProps({ journal: { type: Object, required: true }, imageError: { type: String, default: '' }, imageBusy: Boolean })
 defineEmits(['retry-image'])
 const noteText = computed(() => props.journal.noteText || props.journal.summary || '')
-const noteParagraphs = computed(() => receiptParagraphs(noteText.value, store.locale))
+const noteLanguage = computed(() => props.journal.language || store.locale)
+const noteParagraphs = computed(() => receiptParagraphs(noteText.value, noteLanguage.value))
 const manyClauses = computed(() => noteParagraphs.value.reduce((count, paragraph) => count + paragraph.length, 0) >= 8)
 </script>
 
@@ -21,7 +22,7 @@ const manyClauses = computed(() => noteParagraphs.value.reduce((count, paragraph
       <span class="receipt-paper-bottom"><img src="/journey/receipt/letter-template-no-lines.png" alt="" /></span>
     </div>
     <section class="receipt-note-area" aria-label="给未来的信正文">
-      <p v-if="noteText" class="receipt-note-text" :class="{ 'receipt-note-dense': manyClauses }"><template v-for="(paragraph, paragraphIndex) in noteParagraphs" :key="paragraphIndex"><br v-if="paragraphIndex" /><span v-for="(phrase, phraseIndex) in paragraph" :key="phraseIndex" class="receipt-note-phrase"><span v-for="(word, wordIndex) in phrase.words" :key="wordIndex" class="receipt-note-word">{{ word }}</span></span></template></p>
+      <p v-if="noteText" class="receipt-note-text" :dir="noteLanguage === 'ar' ? 'rtl' : 'ltr'" :class="{ 'receipt-note-dense': manyClauses, 'receipt-note-ar': noteLanguage === 'ar' }"><template v-for="(paragraph, paragraphIndex) in noteParagraphs" :key="paragraphIndex"><br v-if="paragraphIndex" /><span v-for="(phrase, phraseIndex) in paragraph" :key="phraseIndex" class="receipt-note-phrase"><span v-for="(word, wordIndex) in phrase.words" :key="wordIndex" class="receipt-note-word">{{ word }}</span></span></template></p>
       <p v-else class="receipt-note-pending">讲述已留存，等待整理</p>
     </section>
     <figure class="receipt-sketch-area">

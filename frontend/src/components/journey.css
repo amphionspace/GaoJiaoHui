@@ -69,3 +69,7 @@
   transition: none !important;
   opacity: 1 !important;
 }
+
+/* Arabic notes: right-to-left with a Naskh-capable stack. */
+.receipt-note-ar{direction:rtl;text-align:center;font-family:'Noto Naskh Arabic','Geeza Pro','Segoe UI','Songti SC',serif;line-height:1.9}
+.receipt-note-ar .receipt-note-word{unicode-bidi:isolate}

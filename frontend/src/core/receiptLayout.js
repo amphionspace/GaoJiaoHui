@@ -1,4 +1,5 @@
 const CHINESE_BREAK = /[，。！？；：]/u
+const ARABIC_BREAK = /[،؛؟۔]/u
 const ASCII_BREAK = /[,.;:!?]/u
 const CLOSING = /[)\]}）］｝】》〉」』〕”’]/u
 const OPENING = /[(\[{（［｛【《〈「『〔“‘]/u
@@ -16,7 +17,8 @@ function isBoundary(text, index) {
   const char = text[index]
   // Keep decimals, times and grouped numbers intact, including fullwidth separators.
   if (/[.,:，：]/u.test(char) && NUMBER.test(text[index - 1] || '') && NUMBER.test(text[index + 1] || '')) return false
-  return CHINESE_BREAK.test(char) || (ASCII_BREAK.test(char) && asciiBoundary(text, index))
+  return CHINESE_BREAK.test(char) || (!SPACE.test(char) && ARABIC_BREAK.test(char)) ||
+    (ASCII_BREAK.test(char) && asciiBoundary(text, index))
 }
 
 function phrasesIn(paragraph) {

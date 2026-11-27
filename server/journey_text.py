@@ -27,9 +27,9 @@ CONFIG_FILE = Path(__file__).resolve().parents[1] / ".env.journey.json"
 MAX_COMPLETION_TOKENS = 4096
 MAX_REPLY_CHARS = 50
 # English needs far more characters than Chinese for the same content.
-NOTE_LIMITS = {'zh': 80, 'en': 220}
-MESSAGE_LIMITS = {'zh': MAX_REPLY_CHARS, 'en': 160}
-TAKEAWAY_LIMITS = {'zh': MAX_REPLY_CHARS, 'en': 160}
+NOTE_LIMITS = {'zh': 80, 'en': 220, 'ar': 300}
+MESSAGE_LIMITS = {'zh': MAX_REPLY_CHARS, 'en': 160, 'ar': 200}
+TAKEAWAY_LIMITS = {'zh': MAX_REPLY_CHARS, 'en': 160, 'ar': 200}
 # Provider-side overload responses worth one short retry (503 "service is too busy").
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 TOPICS = {"future": "和2036对话：十年后对科技、生活的想象和期待，那时希望自己在做什么", "product": "最惊喜的产品", "idea": "一个新想法", "story": "今天的故事"}
@@ -148,7 +148,7 @@ Keep the concrete, intimate part of the reply. Do not turn a warm, specific resp
 class ComposeRequest(BaseModel):
     transcript: str = Field(min_length=1, max_length=16000)
     topic: Literal["future", "product", "idea", "story"] = "future"
-    language: Literal["zh", "en"] = "zh"
+    language: Literal["zh", "en", "ar"] = "zh"
     session_id: str = Field(default="", max_length=64, pattern=r"^[0-9a-zA-Z-]*$")
 
 
@@ -193,7 +193,12 @@ async def text_status():
 def receipt_quote(message, proposed, language="zh"):
     # Only print a whole sentence from the reviewed reply. A model's paraphrased
     # quote must not invalidate an otherwise usable note or invent a second reply.
-    pattern = r'[^.!?]+[.!?]?' if language == "en" else r'[^。！？!?]+[。！？!?]?'
+    if language == "en":
+        pattern = r'[^.!?]+[.!?]?'
+    elif language == "ar":
+        pattern = r'[^.!?؟۔]+[.!?؟۔]?'
+    else:
+        pattern = r'[^。！？!?]+[。！？!?]?'
     limit = TAKEAWAY_LIMITS.get(language, MAX_REPLY_CHARS)
     sentences = re.findall(pattern, message)
     candidates = [sentence.strip() for sentence in sentences
@@ -213,6 +218,13 @@ def normalize_note_payload(payload):
 
 CJK_CHAR = re.compile(r'[\u3400-\u9fff]')
 LATIN_CHAR = re.compile(r'[A-Za-z]')
+ARABIC_CHAR = re.compile(r'[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]')
+
+ARABIC_INSTRUCTION = (
+    "Write every user-facing field (note_text, message, takeaway, keywords) in Modern Standard Arabic, "
+    "right-to-left, with the same meaning, tone and length as instructed above. "
+    "Keep sketch_prompt in English because it drives an image model."
+)
 
 
 def detect_language(transcript, requested="zh"):
@@ -221,16 +233,23 @@ def detect_language(transcript, requested="zh"):
     text = str(transcript or '')
     cjk = len(CJK_CHAR.findall(text))
     latin = len(LATIN_CHAR.findall(text))
+    arabic = len(ARABIC_CHAR.findall(text))
+    if arabic >= 4 and arabic >= latin and arabic >= cjk:
+        return 'ar'
     if cjk >= 4 and cjk * 2 >= latin:
         return 'zh'
     if latin >= 8 and cjk == 0:
         return 'en'
-    return 'en' if requested == 'en' else 'zh'
+    return requested if requested in ('zh', 'en', 'ar') else 'zh'
 
 
 def has_one_to_three_complete_sentences(value, language="zh"):
-    pattern = r"[^.!?]+[.!?]" if language == "en" else r"[^。！？!?]+[。！？!?]"
-    ending = r"[.!?]$" if language == "en" else r"[。！？!?]$"
+    if language == "en":
+        pattern, ending = r"[^.!?]+[.!?]", r"[.!?]$"
+    elif language == "ar":
+        pattern, ending = r"[^.!?؟۔]+[.!?؟۔]", r"[.!?؟۔]$"
+    else:
+        pattern, ending = r"[^。！？!?]+[。！？!?]", r"[。！？!?]$"
     count = len(re.findall(pattern, value))
     return bool(re.search(ending, value)) and 1 <= count <= 3
 
@@ -277,12 +296,12 @@ def parse_note(content, transcript, language="zh"):
     if any(phrase in note.message for phrase in DISALLOWED_MESSAGE_PHRASES):
         raise ValueError("回信包含万能鼓励或书面产品评审腔，请用贴合这次讲述的自然口语回应")
     note.keywords = [word.strip() for word in note.keywords]
-    keyword_limit = 20 if language == "en" else 8
+    keyword_limit = 30 if language in ("en", "ar") else 8
     if any(not 2 <= len(word) <= keyword_limit for word in note.keywords):
         raise ValueError("关键词必须简短")
     if len(set(note.keywords)) != len(note.keywords):
         raise ValueError("关键词不能重复")
-    anchor_limit = 200 if language == "en" else 80
+    anchor_limit = 300 if language == "ar" else (200 if language == "en" else 80)
     if any(not anchor.strip() or len(anchor) > anchor_limit or anchor not in transcript for anchor in note.anchors):
         raise ValueError("回信依据必须原样出自完整讲述")
     return note
@@ -413,9 +432,12 @@ async def _compose_with(config, request, session_id, started, deadline):
     """One provider's generation + review; yields ("draft"|"final", note)."""
     headers = {"Authorization": "Bearer " + config["api_key"]} if config["api_key"] else {}
     language = detect_language(request.transcript, request.language)
-    english = language == "en"
+    english = language in ("en", "ar")
+    system_prompt = SYSTEM_PROMPT_EN if english else SYSTEM_PROMPT
+    if language == "ar":
+        system_prompt += "\n\n" + ARABIC_INSTRUCTION
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT_EN if english else SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": json.dumps(
             {"topic": TOPICS_EN[request.topic], "transcript": request.transcript} if english else
             {"主题": TOPICS[request.topic], "完整讲述": request.transcript}, ensure_ascii=False)},
@@ -463,7 +485,8 @@ async def _compose_with(config, request, session_id, started, deadline):
                     "model": config["model"], "temperature": 0.2, "max_tokens": MAX_COMPLETION_TOKENS, **effort,
                     "messages": messages[:2] + [
                         {"role": "assistant", "content": note.model_dump_json()},
-                        {"role": "user", "content": REVIEW_PROMPT_EN if english else REVIEW_PROMPT},
+                        {"role": "user", "content": (REVIEW_PROMPT_EN if english else REVIEW_PROMPT) +
+                         ("\n\n" + ARABIC_INSTRUCTION if language == "ar" else "")},
                     ],
                 })
                 if reviewed.status_code >= 400:

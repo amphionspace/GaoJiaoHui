@@ -87,7 +87,7 @@ const noteFields = (journal, data) => {
   }
   // Follow the note's own language: the booth may speak Chinese in the EN UI.
   const noteLanguage = data.language || journal.language
-  const messageLimit = noteLanguage === 'en' ? 160 : 50
+  const messageLimit = noteLanguage === 'ar' ? 200 : (noteLanguage === 'en' ? 160 : 50)
   if (Array.from(data.message).length > messageLimit) {
     throw new Error('这次回信太长，完整讲述已保留，请重新整理。')
   }
