@@ -90,3 +90,11 @@ class JourneyImageTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SketchRequestLimitTests(unittest.TestCase):
+    def test_english_length_note_is_accepted(self):
+        from server.journey_image import SketchRequest
+        request = SketchRequest(summary='I want to understand what the future holds. ' * 4,
+                                scene='Two people talking about a new product on a table between them.')
+        self.assertGreater(len(request.summary), 110)

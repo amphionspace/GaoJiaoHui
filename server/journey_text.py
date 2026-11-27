@@ -159,7 +159,7 @@ class ComposedNote(BaseModel):
     takeaway: str = Field(default="", max_length=400)
     keywords: list[str] = Field(min_length=1, max_length=3)
     anchors: list[str] = Field(min_length=1, max_length=3)
-    sketch_prompt: str = Field(default='', max_length=180)
+    sketch_prompt: str = Field(default='', max_length=300)
 
 
 def configuration():

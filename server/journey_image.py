@@ -22,8 +22,10 @@ MAX_IMAGE_BYTES = 8 * 1024 * 1024
 
 
 class SketchRequest(BaseModel):
-    summary: str = Field(min_length=2, max_length=110)
-    scene: str = Field(default='', max_length=180)
+    # English notes run to ~220 characters, so the request budget follows the
+    # note limits instead of the old Chinese-only 110/180.
+    summary: str = Field(min_length=2, max_length=400)
+    scene: str = Field(default='', max_length=400)
 
 
 def sketch_prompt(scene):
