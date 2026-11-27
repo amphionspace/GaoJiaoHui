@@ -2,45 +2,52 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { anySignal, timeoutSignal, withTimeout } from '../src/core/abortSignals.js'
 
-// Passing an object without the static methods exercises the fallback path
-// without mutating the global AbortSignal (CI may freeze it).
+// An object without the statics exercises the fallback path; the real
+// AbortSignal is never mutated, so the tests behave the same on every Node.
 const NO_STATICS = {}
 
-test('anySignal aborts as soon as one input aborts', () => {
-  for (const Signal of [undefined, NO_STATICS]) {
-    const first = new AbortController()
-    const second = new AbortController()
-    const merged = Signal ? anySignal([first.signal, second.signal], Signal) : anySignal([first.signal, second.signal])
-    assert.equal(merged.aborted, false)
-    second.abort(new Error('stop'))
-    assert.equal(merged.aborted, true)
+test('uses the platform helpers when the browser has them', () => {
+  const calls = []
+  const Signal = {
+    any: signals => { calls.push('any'); return signals[0] },
+    timeout: milliseconds => { calls.push('timeout:' + milliseconds); return new AbortController().signal },
   }
+  const parent = new AbortController()
+  anySignal([parent.signal], Signal)
+  withTimeout(parent.signal, 20, Signal)
+  assert.deepEqual(calls, ['any', 'timeout:20', 'any'])
 })
 
-test('anySignal passes an already-aborted signal through', () => {
-  for (const Signal of [undefined, NO_STATICS]) {
-    const parent = new AbortController()
-    parent.abort(new Error('early'))
-    const merged = Signal ? anySignal([parent.signal], Signal) : anySignal([parent.signal])
-    assert.equal(merged.aborted, true)
-    assert.equal(merged.reason.message, 'early')
-  }
+test('fallback anySignal aborts as soon as one input aborts', () => {
+  const first = new AbortController()
+  const second = new AbortController()
+  const merged = anySignal([first.signal, second.signal], NO_STATICS)
+  assert.equal(merged.aborted, false)
+  second.abort(new Error('stop'))
+  assert.equal(merged.aborted, true)
 })
 
-test('timeoutSignal aborts with a TimeoutError', async () => {
-  for (const Signal of [undefined, NO_STATICS]) {
-    const signal = Signal ? timeoutSignal(10, Signal) : timeoutSignal(10)
-    await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }))
-    assert.equal(signal.reason.name, 'TimeoutError')
-  }
+test('fallback anySignal passes an already-aborted signal through', () => {
+  const parent = new AbortController()
+  parent.abort(new Error('early'))
+  const merged = anySignal([parent.signal], NO_STATICS)
+  assert.equal(merged.aborted, true)
+  assert.equal(merged.reason.message, 'early')
 })
 
-test('withTimeout keeps the caller signal and adds the deadline', () => {
-  for (const Signal of [undefined, NO_STATICS]) {
-    const parent = new AbortController()
-    const merged = Signal ? withTimeout(parent.signal, 5000, Signal) : withTimeout(parent.signal, 5000)
-    parent.abort(new Error('user cancelled'))
-    assert.equal(merged.aborted, true)
-    assert.equal(merged.reason.message, 'user cancelled')
-  }
+test('fallback timeoutSignal aborts with a TimeoutError', async () => {
+  const signal = timeoutSignal(20, NO_STATICS)
+  await new Promise((resolve, reject) => {
+    const guard = setTimeout(() => reject(new Error('the timeout never fired')), 2000)
+    signal.addEventListener('abort', () => { clearTimeout(guard); resolve() }, { once: true })
+  })
+  assert.equal(signal.reason.name, 'TimeoutError')
+})
+
+test('fallback withTimeout keeps the caller signal', () => {
+  const parent = new AbortController()
+  const merged = withTimeout(parent.signal, 20, NO_STATICS)
+  parent.abort(new Error('user cancelled'))
+  assert.equal(merged.aborted, true)
+  assert.equal(merged.reason.message, 'user cancelled')
 })
