@@ -310,6 +310,7 @@ async function composeNote() {
     imageBusy.value = false
     textRequest = null
     stage.value = 'preview'                 // one transition, already illustrated
+    captureReceipt(journal.value.sessionId || visitSession)
     if (voiceEnabled.value && voice?.registration) await makeAudio(!document.hidden, false, true)
     else if (voiceEnabled.value && !textMode.value) {
       voiceState.value = 'failed'
@@ -328,7 +329,12 @@ async function retryIllustration() {
   imageBusy.value = true; imageIssue.value = ''
   try {
     const illustration = await illustrateJourneyJournal(draft, { signal: controller.signal, apiKey: store.apiKey })
-    if (id === session && textRequest === controller && !controller.signal.aborted) journal.value = { ...journal.value, ...illustration }
+    if (id === session && textRequest === controller && !controller.signal.aborted) {
+      journal.value = { ...journal.value, ...illustration }
+      const sessionId = journal.value.sessionId || visitSession
+      capturedReceipts.delete(sessionId)
+      captureReceipt(sessionId)
+    }
   } catch (e) {
     if (id === session && textRequest === controller && !controller.signal.aborted) imageIssue.value = e.message
   } finally {
@@ -393,9 +399,11 @@ async function captureReceipt(sessionId) {
   const node = document.getElementById('journey-print-root')
   if (!node) return
   capturedReceipts.add(sessionId)
+  await nextTick()
   const previous = node.getAttribute('style')
   node.setAttribute('style', 'display:flex;position:fixed;left:-200mm;top:0;width:80mm;height:170mm;align-items:center;justify-content:center;background:#f4ebdf')
   try {
+    await Promise.all([...node.querySelectorAll('img')].map(img => img.decode?.().catch(() => {})))
     const image = await toPng(node, { pixelRatio: 2, backgroundColor: '#f4ebdf', cacheBust: true })
     await fetch('/api/journey/snapshot', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
