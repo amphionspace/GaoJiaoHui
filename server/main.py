@@ -326,6 +326,8 @@ async def asr_check():
     managed = managed_asr.enabled()
     if not managed:
         return {'ok': True, 'managed': False, 'detail': 'gateway key'}
+    if managed_asr.deepfake_enabled():
+        return {'ok': True, 'managed': True, 'detail': 'deepfake'}
     try:
         managed_asr.configuration()
         await managed_asr.mint_token()

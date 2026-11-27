@@ -47,8 +47,28 @@ def local_ports():
     return ports
 
 
+def deepfake_url():
+    """A server-owned Deepfake DashScope ASR bridge URL, if configured."""
+    raw = os.environ.get('JOURNEY_DEEPFAKE_ASR_URL', '').strip()
+    if not raw:
+        return ''
+    try:
+        url = urlsplit(raw)
+        query = dict(pair.split('=', 1) for pair in url.query.split('&') if '=' in pair)
+    except (TypeError, ValueError):
+        raise HTTPException(503, 'Deepfake ASR 地址配置无效。') from None
+    if (url.scheme != 'wss:' or not url.hostname or url.username or url.password
+            or url.fragment or not query.get('token')):
+        raise HTTPException(503, 'Deepfake ASR 地址配置无效。')
+    return raw
+
+
+def deepfake_enabled():
+    return bool(deepfake_url())
+
+
 def enabled():
-    return bool(os.environ.get('JOURNEY_ASR_CONFIG_FILE', '').strip())
+    return deepfake_enabled() or bool(os.environ.get('JOURNEY_ASR_CONFIG_FILE', '').strip())
 
 
 def public_host():
@@ -110,7 +130,8 @@ def signature(value):
 def issue_cookie(request, response):
     if not local_request(request):
         raise HTTPException(403, '请从本机 Demo 页面连接。')
-    configuration()
+    if not deepfake_enabled():
+        configuration()
     expires = str(int(time.time()) + 8 * 3600)
     response.set_cookie(COOKIE, expires + '.' + signature(expires), max_age=8 * 3600,
                         httponly=True, secure=request.url.hostname == public_host(), samesite='strict', path='/api')
@@ -126,6 +147,8 @@ def require_session(request):
         valid = False
     if not valid:
         raise HTTPException(401, '本机会话已过期，请刷新 Demo 后重试。')
+    if deepfake_enabled():
+        return 'deepfake:' + hashlib.sha256(deepfake_url().encode()).hexdigest()
     return 'managed:' + hashlib.sha256(configuration()['api_key'].encode()).hexdigest()
 
 
@@ -157,6 +180,8 @@ def _token_lifetime(token):
 
 
 async def mint_token(config=None):
+    if deepfake_enabled() and config is None:
+        return 'deepfake'
     config = config or configuration()
     fingerprint = _fingerprint(config)
     if _reusable(fingerprint):
@@ -200,6 +225,8 @@ async def _request_token(config):
 
 
 async def session_url():
+    if deepfake_enabled():
+        return deepfake_url()
     config = configuration()
     token = await mint_token(config)
     base = config['base_url'].replace('https://', 'wss://', 1)
