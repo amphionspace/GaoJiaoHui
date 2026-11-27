@@ -396,15 +396,19 @@ let printStartedAt = 0
 const capturedReceipts = new Set()
 async function captureReceipt(sessionId) {
   if (!sessionId || !store.sessionLog || capturedReceipts.has(sessionId)) return
-  const node = document.getElementById('journey-print-root')
+  await nextTick()
+  // Capture the receipt that is actually on screen: the hidden print copy uses
+  // container queries that do not resolve inside html-to-image's offscreen clone.
+  const node = document.querySelector('.journey-result .journey-receipt')
   if (!node) return
   capturedReceipts.add(sessionId)
-  await nextTick()
-  const previous = node.getAttribute('style')
-  node.setAttribute('style', 'display:flex;position:fixed;left:-200mm;top:0;width:80mm;height:170mm;align-items:center;justify-content:center;background:#f4ebdf')
+  node.classList.add('journey-capturing')
   try {
     await Promise.all([...node.querySelectorAll('img')].map(img => img.decode?.().catch(() => {})))
-    const image = await toPng(node, { pixelRatio: 2, backgroundColor: '#f4ebdf', cacheBust: true })
+    const width = node.offsetWidth, height = node.offsetHeight
+    const image = await toPng(node, { pixelRatio: 2, backgroundColor: '#f4ebdf', cacheBust: true,
+      width, height,
+      style: { boxShadow: 'none', margin: '0', width: width + 'px', height: height + 'px' } })
     await fetch('/api/journey/snapshot', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ session_id: sessionId, image }),
@@ -412,8 +416,7 @@ async function captureReceipt(sessionId) {
   } catch {
     capturedReceipts.delete(sessionId)
   } finally {
-    if (previous === null) node.removeAttribute('style')
-    else node.setAttribute('style', previous)
+    node.classList.remove('journey-capturing')
   }
 }
 async function printJournal() {
