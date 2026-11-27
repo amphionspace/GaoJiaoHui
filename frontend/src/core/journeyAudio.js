@@ -163,7 +163,7 @@ export class JourneyRecorder {
     // Obtain permission before opening an upstream session that expects incoming audio.
     await this.waitForStart(this.mic.prepare({ echoCancellation: true, noiseSuppression: true, autoGainControl: false }), '还没有接通麦克风，请在浏览器中允许麦克风权限，再点击继续录音。')
     if (this.closed) return
-    this.startupTimer = setTimeout(() => this.fail('语音准备超过 20 秒，请检查网络后重试，或改用文字记录。'), 20000)
+    this.startupTimer = setTimeout(() => this.fail('语音准备超过 40 秒，请检查网络后重试，或改用文字记录。'), 40000)
     this.handlers.onPhase?.('speech')
     const pending = createSpeechDetector().then(async detector => {
       if (this.closed) { await detector.dispose(); return null }
@@ -174,7 +174,7 @@ export class JourneyRecorder {
     if (this.managed) this.sessionController = new AbortController()
     const sessionPending = this.managed ? this.takeSession(this.sessionController.signal) : null
     sessionPending?.catch(() => {})
-    this.detector = await this.waitForStart(pending, '人声检测未能启动，请刷新页面重试，或改用文字记录。')
+    this.detector = await this.waitForStart(pending, '人声检测未能启动，请刷新页面重试，或改用文字记录。', 40000)
     if (this.closed) { await this.detector?.dispose(); this.detector = null; return }
     this.handlers.onPhase?.('connection')
     let socketUrl = `${WS_HOST}/asr/v1/target-dialogue?api_key=${encodeURIComponent(this.key)}`
@@ -195,7 +195,7 @@ export class JourneyRecorder {
       // Each attempt gets its own guard: switching providers must not consume
       // the budget that belonged to the previous one.
       clearTimeout(this.startupTimer)
-      this.startupTimer = setTimeout(() => this.fail('语音准备超过 20 秒，请检查网络后重试，或改用文字记录。'), 20000)
+      this.startupTimer = setTimeout(() => this.fail('语音准备超过 40 秒，请检查网络后重试，或改用文字记录。'), 40000)
       try {
         socket = await this.openSocket(current ? sessionCandidates(current) : candidates)
         break
