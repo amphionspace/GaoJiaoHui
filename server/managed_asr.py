@@ -57,7 +57,7 @@ def deepfake_url():
         query = dict(pair.split('=', 1) for pair in url.query.split('&') if '=' in pair)
     except (TypeError, ValueError):
         raise HTTPException(503, 'Deepfake ASR 地址配置无效。') from None
-    if (url.scheme != 'wss:' or not url.hostname or url.username or url.password
+    if (url.scheme != 'wss' or not url.hostname or url.username or url.password
             or url.fragment or not query.get('token')):
         raise HTTPException(503, 'Deepfake ASR 地址配置无效。')
     return raw
