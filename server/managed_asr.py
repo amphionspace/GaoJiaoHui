@@ -86,7 +86,7 @@ def _validated_config(value):
     base = str(value['base_url']).rstrip('/')
     key = str(value['api_key']).strip()
     url = urlsplit(base)
-    if (url.scheme != 'https' or url.hostname not in {'api.fourhz.ai', 'api.fourhz.amphion.top'}
+    if (url.scheme != 'https' or url.hostname not in {'api.fourhz.cn', 'api.fourhz.ai', 'api.fourhz.amphion.top'}
             or url.username or url.password or url.query or url.fragment or url.path or url.port not in (None, 443)
             or not key or len(key) > 512):
         raise ValueError()
@@ -249,30 +249,35 @@ def _ws_url(config, token):
     return base + '/v1/asr/realtime?' + urlencode({'speech_model': 'fourhz-spectrum', 'token': token})
 
 
-async def session_urls(fallback=False):
-    """Every usable endpoint, fastest first: local bridge, production, then test.
+def providers():
+    """Ordered deployments: domestic production, test, then the local bridge."""
+    return [configuration(), *fallback_configurations()]
 
-    FourHz hands out single-use tokens, so a new socket always needs a fresh
-    one: minting happens only when the caller actually needs that provider
-    (the bridge is static, so the normal path mints nothing and stays fast).
+
+async def session_urls(stage=0):
+    """Return the endpoints for one stage and whether another stage exists.
+
+    FourHz tokens are single use, so only the provider about to be dialled is
+    minted; a failing provider falls through to the next stage instead of
+    blocking the visit. Stage 0 is the domestic production host, the configured
+    fallbacks follow, and the local bridge is always the last resort.
     """
-    urls = []
-    if not fallback and deepfake_enabled():
-        urls.append(deepfake_url())
-    else:
-        for config in [configuration(), *fallback_configurations()]:
-            try:
-                # Hand each token out exactly once: the provider accepts a single
-                # socket per token, so it is removed from the cache immediately.
-                token = await mint_token(config)
-                _token_cache.pop(_fingerprint(config), None)
-                urls.append(_ws_url(config, token))
-            except HTTPException:
-                continue
-    if not urls:
-        raise HTTPException(503, '语音服务暂时不可用，请稍后重试。')
-    return urls
+    configs = providers()
+    bridge = deepfake_url() if deepfake_enabled() else ''
+    while stage < len(configs):
+        config = configs[stage]
+        try:
+            token = await mint_token(config)
+        except HTTPException:
+            stage += 1
+            continue
+        # Hand each token out exactly once: one token opens one socket.
+        _token_cache.pop(_fingerprint(config), None)
+        return [_ws_url(config, token)], stage + 1 < len(configs) or bool(bridge)
+    if stage == len(configs) and bridge:
+        return [bridge], False
+    raise HTTPException(503, '语音服务暂时不可用，请稍后重试。')
 
 
 async def session_url():
-    return (await session_urls())[0]
+    return (await session_urls())[0][0]

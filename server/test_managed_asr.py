@@ -245,13 +245,15 @@ class ManagedAsrTests(unittest.IsolatedAsyncioTestCase):
              patch.object(managed_asr, 'fallback_configurations', return_value=[testing]), \
              patch.object(managed_asr, 'deepfake_url', return_value=bridge), \
              patch.object(managed_asr, '_request_token', request):
-            fast = await managed_asr.session_urls()
-            urls = await managed_asr.session_urls(fallback=True)
-        # The fast bridge is served alone; FourHz is only minted on fallback.
-        self.assertEqual(fast, [bridge])
-        self.assertEqual(len(urls), 2)
-        self.assertTrue(urls[0].startswith('wss://api.fourhz.ai/v1/asr/realtime?'))
-        self.assertTrue(urls[1].startswith('wss://api.fourhz.amphion.top/v1/asr/realtime?'))
+            first = await managed_asr.session_urls(0)
+            second = await managed_asr.session_urls(1)
+            third = await managed_asr.session_urls(2)
+        # Production first, test second, the bridge always last.
+        self.assertTrue(first[0][0].startswith('wss://api.fourhz.ai/v1/asr/realtime?'))
+        self.assertTrue(first[1])
+        self.assertTrue(second[0][0].startswith('wss://api.fourhz.amphion.top/v1/asr/realtime?'))
+        self.assertTrue(second[1])
+        self.assertEqual(third, ([bridge], False))
 
     async def test_a_failing_primary_is_skipped_for_the_next_candidate(self):
         production = {'base_url': 'https://api.fourhz.ai', 'api_key': 'prod-key'}
@@ -266,9 +268,10 @@ class ManagedAsrTests(unittest.IsolatedAsyncioTestCase):
              patch.object(managed_asr, 'fallback_configurations', return_value=[testing]), \
              patch.object(managed_asr, 'deepfake_url', return_value=''), \
              patch.object(managed_asr, '_request_token', request):
-            urls = await managed_asr.session_urls()
+            urls, more = await managed_asr.session_urls(0)
         self.assertEqual(len(urls), 1)
         self.assertTrue(urls[0].startswith('wss://api.fourhz.amphion.top/'))
+        self.assertFalse(more)
 
     async def test_rate_limited_mint_is_retried_once(self):
         calls = []

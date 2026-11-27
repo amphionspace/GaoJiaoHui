@@ -179,8 +179,9 @@ export class JourneyRecorder {
     this.handlers.onPhase?.('connection')
     let socketUrl = `${WS_HOST}/asr/v1/target-dialogue?api_key=${encodeURIComponent(this.key)}`
     let candidates = [socketUrl]
+    let session = null
     if (this.managed) {
-      const session = await this.waitForStart(sessionPending, '语音授权超时，请重试或改用文字记录。')
+      session = await this.waitForStart(sessionPending, '语音授权超时，请重试或改用文字记录。')
       if (this.closed) return
       let parsed
       try { parsed = new URL(session.url) } catch { throw new Error('语音连接地址无效，请检查服务配置。') }
@@ -189,13 +190,17 @@ export class JourneyRecorder {
       candidates = sessionCandidates(session)
     }
     let socket
-    try {
-      socket = await this.openSocket(candidates)
-    } catch (error) {
-      // The fast local bridge is a dead end: ask for the FourHz deployments.
-      if (!this.managed || session?.fallback !== true) { this.stop(); throw error }
-      const extra = await this.takeSession(this.sessionController?.signal, true)
-      socket = await this.openSocket(sessionCandidates(extra)).catch(next => { this.stop(); throw next })
+    let current = session
+    for (let stage = 0; ; stage++) {
+      try {
+        socket = await this.openSocket(current ? sessionCandidates(current) : candidates)
+        break
+      } catch (error) {
+        // Move to the next deployment: production, test, then the bridge.
+        if (!this.managed || current?.fallback !== true || stage >= 4) { this.stop(); throw error }
+        current = await this.takeSession(this.sessionController?.signal, stage + 1)
+          .catch(next => { this.stop(); throw next })
+      }
     }
     this.socket = socket
     this.rejectStart = null

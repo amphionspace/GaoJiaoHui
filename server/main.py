@@ -661,11 +661,11 @@ async def config(request: Request, response: Response):
 
 
 @app.post('/api/journey/asr-session', dependencies=[Depends(compose_access)])
-async def asr_session(fallback: bool = False):
+async def asr_session(stage: int = 0):
     metrics_store.event('asr_session')
-    urls = await managed_asr.session_urls(fallback=fallback)
+    urls, more = await managed_asr.session_urls(max(0, min(stage, 4)))
     body = {'url': urls[0], 'urls': urls}
-    if not fallback and managed_asr.deepfake_enabled():
+    if more:
         body['fallback'] = True
     return body
 
