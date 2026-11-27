@@ -19,7 +19,9 @@ LOCAL_HOSTS = {'127.0.0.1', 'localhost', '::1'}
 # 临时凭证本身有效期 60 秒；签发一次约需 1 秒，此前每个录音会话（以及每次访问
 # 校验）都要重新签发，占掉「点击开始说话 -> 可以说话」这段关键路径。凭证只用于
 # 建立 WS 握手，40 秒内复用仍留有 20 秒连接余量。
-SESSION_REUSE_SECONDS = 40
+# 服务商允许 1 到 600 秒；签得越长，越不容易撞上「签发限流」。
+TOKEN_SECONDS = max(60, min(600, int(os.environ.get('JOURNEY_ASR_TOKEN_SECONDS', '600') or 600)))
+SESSION_REUSE_SECONDS = TOKEN_SECONDS
 _token_cache = {'fingerprint': None, 'token': '', 'expires': 0.0}
 _token_locks = {}
 
@@ -151,7 +153,7 @@ def _token_lifetime(token):
     except (KeyError, IndexError, ValueError, TypeError):
         return float(SESSION_REUSE_SECONDS)
     # Keep a margin for the handshake itself, and never exceed the fixed window.
-    return max(12.0, min(float(SESSION_REUSE_SECONDS) + 12.0, left - 8.0))
+    return max(12.0, min(float(SESSION_REUSE_SECONDS), left - 15.0))
 
 
 async def mint_token(config=None):
@@ -173,7 +175,7 @@ async def _request_token(config):
         async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
             for attempt in range(2):
                 response = await client.get(config['base_url'] + '/v1/token',
-                                            params={'expires_in_seconds': 60},
+                                            params={'expires_in_seconds': TOKEN_SECONDS},
                                             headers={'Authorization': config['api_key']})
                 # The provider rate-limits minting per minute; one short retry
                 # turns most bursts into a delay instead of a failed visit.

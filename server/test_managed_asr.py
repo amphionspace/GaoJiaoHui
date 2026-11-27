@@ -217,7 +217,7 @@ class ManagedAsrTests(unittest.IsolatedAsyncioTestCase):
             seen.append(request)
             self.assertEqual(request.method, 'GET')
             self.assertEqual(request.headers['authorization'], self.config['api_key'])
-            self.assertEqual(str(request.url), 'https://api.fourhz.amphion.top/v1/token?expires_in_seconds=60')
+            self.assertEqual(str(request.url), f'https://api.fourhz.amphion.top/v1/token?expires_in_seconds={managed_asr.TOKEN_SECONDS}')
             self.assertNotIn('x-api-key', request.headers)
             return httpx.Response(200, json={'token': 'temporary-token'})
 
