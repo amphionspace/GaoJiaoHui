@@ -1,10 +1,14 @@
 // AbortSignal.any() arrived in Chrome 116 and AbortSignal.timeout() in 103.
 // The booth may run on an older Chrome (Windows 7 caps at 109), so both calls
 // go through these fallbacks instead of failing with "is not a function".
+// The Signal argument exists so tests can exercise the fallback without
+// replacing the global AbortSignal.
 
-export function timeoutSignal(milliseconds) {
-  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
-    return AbortSignal.timeout(milliseconds)
+const GLOBAL_SIGNAL = typeof AbortSignal === 'undefined' ? undefined : AbortSignal
+
+export function timeoutSignal(milliseconds, Signal = GLOBAL_SIGNAL) {
+  if (Signal && typeof Signal.timeout === 'function') {
+    return Signal.timeout(milliseconds)
   }
   const controller = new AbortController()
   const timer = setTimeout(() => {
@@ -15,10 +19,10 @@ export function timeoutSignal(milliseconds) {
   return controller.signal
 }
 
-export function anySignal(signals) {
+export function anySignal(signals, Signal = GLOBAL_SIGNAL) {
   const list = (signals || []).filter(Boolean)
-  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function') {
-    return AbortSignal.any(list)
+  if (Signal && typeof Signal.any === 'function') {
+    return Signal.any(list)
   }
   const controller = new AbortController()
   for (const signal of list) {
@@ -31,6 +35,8 @@ export function anySignal(signals) {
   return controller.signal
 }
 
-export function withTimeout(signal, milliseconds) {
-  return signal ? anySignal([signal, timeoutSignal(milliseconds)]) : timeoutSignal(milliseconds)
+export function withTimeout(signal, milliseconds, Signal = GLOBAL_SIGNAL) {
+  return signal
+    ? anySignal([signal, timeoutSignal(milliseconds, Signal)], Signal)
+    : timeoutSignal(milliseconds, Signal)
 }
