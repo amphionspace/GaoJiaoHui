@@ -394,8 +394,10 @@ async function togglePlayback() {
 }
 let printStartedAt = 0
 const capturedReceipts = new Set()
-async function captureReceipt(sessionId) {
-  if (!sessionId || !store.sessionLog || capturedReceipts.has(sessionId)) return
+async function captureReceipt(sessionId, force = false) {
+  if (!sessionId || !store.sessionLog) return
+  if (force) capturedReceipts.delete(sessionId)
+  if (capturedReceipts.has(sessionId)) return
   await nextTick()
   // Capture the receipt that is actually on screen: the hidden print copy uses
   // container queries that do not resolve inside html-to-image's offscreen clone.
@@ -423,7 +425,8 @@ async function printJournal() {
   if (!journal.value?.summary || stage.value === 'printing' || imageBusy.value || notePending.value) return
   const id = session, printText = journal.value.noteText || journal.value.summary
   stopPlayback(); stopRecording(); stage.value = 'printing'; printReturned.value = false
-  captureReceipt(journal.value.sessionId || visitSession)
+  // The sheet that goes to the printer is the one worth keeping.
+  await captureReceipt(journal.value.sessionId || visitSession, true)
   printStartedAt = performance.now()
   await nextTick()
   try {
