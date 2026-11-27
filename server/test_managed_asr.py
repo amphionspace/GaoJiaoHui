@@ -233,6 +233,19 @@ class ManagedAsrTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn('private-provider-diagnostics', error.exception.detail)
                 self.assertNotIn(self.config['api_key'], error.exception.detail)
 
+    async def test_rate_limited_mint_is_retried_once(self):
+        calls = []
+
+        def handler(_):
+            calls.append(1)
+            if len(calls) == 1:
+                return httpx.Response(429, text='busy')
+            return httpx.Response(200, json={'token': 'good-token'})
+
+        token = await self.token_request(handler)
+        self.assertEqual(token, 'good-token')
+        self.assertEqual(len(calls), 2)
+
     async def test_malformed_token_payloads_fail_without_raw_provider_details(self):
         for content in ('[]', 'null', '"private-provider-diagnostics"', '{}', '{"token":false}', '{"token":""}', 'not-json'):
             with self.subTest(payload=content):

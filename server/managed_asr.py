@@ -1,5 +1,6 @@
 """Local-only FourHz credentials and browser sessions; never expose the long-lived key."""
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -140,6 +141,19 @@ def _reusable(fingerprint):
             and _token_cache['expires'] > time.monotonic())
 
 
+def _token_lifetime(token):
+    """Seconds this token can still be handed out for a WS handshake."""
+    try:
+        payload = token.split('.')[1]
+        payload += '=' * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+        left = float(claims['exp']) - time.time()
+    except (KeyError, IndexError, ValueError, TypeError):
+        return float(SESSION_REUSE_SECONDS)
+    # Keep a margin for the handshake itself, and never exceed the fixed window.
+    return max(12.0, min(float(SESSION_REUSE_SECONDS) + 12.0, left - 8.0))
+
+
 async def mint_token(config=None):
     config = config or configuration()
     fingerprint = _fingerprint(config)
@@ -150,16 +164,22 @@ async def mint_token(config=None):
             return _token_cache['token']
         token = await _request_token(config)
         _token_cache.update(fingerprint=fingerprint, token=token,
-                            expires=time.monotonic() + SESSION_REUSE_SECONDS)
+                            expires=time.monotonic() + _token_lifetime(token))
         return token
 
 
 async def _request_token(config):
     try:
         async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
-            response = await client.get(config['base_url'] + '/v1/token',
-                                        params={'expires_in_seconds': 60},
-                                        headers={'Authorization': config['api_key']})
+            for attempt in range(2):
+                response = await client.get(config['base_url'] + '/v1/token',
+                                            params={'expires_in_seconds': 60},
+                                            headers={'Authorization': config['api_key']})
+                # The provider rate-limits minting per minute; one short retry
+                # turns most bursts into a delay instead of a failed visit.
+                if response.status_code != 429 or attempt:
+                    break
+                await asyncio.sleep(1.2)
         if response.status_code in (401, 403):
             raise HTTPException(401, '新的 ASR 密钥无效或无访问权限，请检查本机配置。')
         if response.status_code == 402:
