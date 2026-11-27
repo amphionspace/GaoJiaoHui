@@ -343,9 +343,6 @@ async function retryIllustration() {
 }
 async function makeAudio(autoplay = false, retry = false, quiet = false) {
   if (!journal.value?.messageToSelf || !voiceEnabled.value) return
-  // The cloned voice cannot read Arabic; keep the reply as text instead of
-  // playing unintelligible audio.
-  if (journal.value.language === 'ar') { voiceState.value = 'skipped'; return }
   stopRecording(); stopPlayback(); releaseAudio()
   const id = session, job = ++audioTask, revision = journal.value.revision
   error.value = voiceIssue.value = ''
