@@ -267,3 +267,39 @@ class ReceiptStorageTests(unittest.TestCase):
             self.assertEqual(sessions.summary()['receipts'], 1)
             sessions.clear()
             self.assertFalse(Path(path).exists())
+
+
+class ReceiptCleanupTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        base = Path(self.directory.name)
+        self.env = {
+            'JOURNEY_SESSION_LOG': '1', 'JOURNEY_SESSION_DB': str(base / 'sessions.sqlite3'),
+            'JOURNEY_SESSION_AUDIO_DIR': str(base / 'audio'),
+            'JOURNEY_SESSION_IMAGE_DIR': str(base / 'images'),
+        }
+
+    def test_a_fresh_receipt_survives_the_orphan_sweep(self):
+        png = b'\x89PNG\r\n\x1a\n' + b'\x00' * 32
+        with patch.dict('os.environ', self.env):
+            self.assertTrue(sessions.save_receipt('d' * 32, png))
+            path = sessions.receipt_path('d' * 32)
+            with sessions._connection() as connection:
+                sessions._orphan_images(connection)
+            self.assertTrue(Path(path).is_file(), 'a just-written receipt must not be swept')
+
+    def test_a_stale_orphan_is_removed(self):
+        import os
+        with patch.dict('os.environ', self.env):
+            folder = Path(self.env['JOURNEY_SESSION_IMAGE_DIR'])
+            folder.mkdir(parents=True, exist_ok=True)
+            orphan = folder / ('e' * 32 + '.receipt.png')
+            orphan.write_bytes(b'\x89PNG\r\n\x1a\n' + b'\x00' * 8)
+            past = 1700000000
+            os.utime(orphan, (past, past))
+            with sessions._connection() as connection:
+                sessions._orphan_images(connection)
+            self.assertFalse(orphan.exists())

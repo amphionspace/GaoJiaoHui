@@ -165,12 +165,26 @@ def _prune(connection):
     _orphan_images(connection)
 
 
+def _image_owner(name):
+    for suffix in ('.receipt.png', '.png'):
+        if name.endswith(suffix):
+            return name[:-len(suffix)]
+    return ''
+
+
 def _orphan_images(connection):
     if not image_dir().exists():
         return
     known = {row[0] for row in connection.execute('SELECT id FROM sessions')}
+    now = time.time()
     for file in image_dir().glob('*.png'):
-        if file.stem not in known:
+        try:
+            # A file written moments ago may still be waiting for its row.
+            if now - file.stat().st_mtime < 600:
+                continue
+        except OSError:
+            continue
+        if _image_owner(file.name) not in known:
             try:
                 file.unlink()
             except OSError:
