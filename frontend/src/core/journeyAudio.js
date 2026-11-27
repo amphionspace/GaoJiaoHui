@@ -15,15 +15,21 @@ let preparedSession = null
 let sessionPending = null
 
 function takePreparedSession() {
-  if (!preparedSession) return ''
-  const { url, at } = preparedSession
+  if (!preparedSession) return null
+  const { url, urls, at } = preparedSession
   preparedSession = null
-  return Date.now() - at < SESSION_REUSE_MS ? url : ''
+  return Date.now() - at < SESSION_REUSE_MS ? { url, urls } : null
+}
+
+function sessionCandidates(session) {
+  if (!session) return []
+  const list = [session.url, ...(Array.isArray(session.urls) ? session.urls : [])]
+  return [...new Set(list.filter(url => typeof url === 'string' && url))]
 }
 
 function rememberSession(session) {
-  const url = session && typeof session.url === 'string' ? session.url : ''
-  preparedSession = url ? { url, at: Date.now() } : null
+  const urls = sessionCandidates(session)
+  preparedSession = urls.length ? { url: urls[0], urls, at: Date.now() } : null
   return session
 }
 
@@ -114,13 +120,41 @@ export class JourneyRecorder {
 
   async takeSession(signal) {
     const prepared = takePreparedSession()
-    if (prepared) return { url: prepared }
+    if (prepared) return prepared
     if (sessionPending) await sessionPending
     const ready = takePreparedSession()
     if (ready) return { url: ready }
     return rememberSession(await api('/asr-session', {
       prefix: '/api/journey', method: 'POST', signal,
     }))
+  }
+
+  async openSocket(candidates) {
+    let failure = null
+    for (const url of candidates) {
+      let parsed
+      try { parsed = new URL(url) } catch { failure = new Error('语音连接地址无效，请检查服务配置。'); continue }
+      if (parsed.protocol !== 'wss:' || parsed.username || parsed.password || parsed.hash) {
+        failure = new Error('语音连接地址无效，请检查服务配置。'); continue
+      }
+      const socket = new WebSocket(url)
+      try {
+        await new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => fail('语音连接超时，请重试。'), 8000)
+          const fail = message => { clearTimeout(timeout); reject(new Error(message)) }
+          this.rejectStart = () => fail('会话已结束')
+          socket.onopen = () => { clearTimeout(timeout); resolve() }
+          socket.onerror = () => fail('语音服务连接失败，请检查网络或设置。')
+          socket.onclose = () => fail('语音连接已关闭，请检查设置后重试。')
+        })
+        return socket
+      } catch (error) {
+        failure = error
+        try { socket.close() } catch {}
+        if (this.closed) throw error
+      }
+    }
+    throw failure || new Error('语音服务暂时不可用，请稍后重试。')
   }
 
   async startInput() {
@@ -144,6 +178,7 @@ export class JourneyRecorder {
     if (this.closed) { await this.detector?.dispose(); this.detector = null; return }
     this.handlers.onPhase?.('connection')
     let socketUrl = `${WS_HOST}/asr/v1/target-dialogue?api_key=${encodeURIComponent(this.key)}`
+    let candidates = [socketUrl]
     if (this.managed) {
       const session = await this.waitForStart(sessionPending, '语音授权超时，请重试或改用文字记录。')
       if (this.closed) return
@@ -151,16 +186,9 @@ export class JourneyRecorder {
       try { parsed = new URL(session.url) } catch { throw new Error('语音连接地址无效，请检查服务配置。') }
       if (parsed.protocol !== 'wss:' || parsed.username || parsed.password || parsed.hash) throw new Error('语音连接地址无效，请检查服务配置。')
       socketUrl = session.url
+      candidates = sessionCandidates(session)
     }
-    const socket = this.socket = new WebSocket(socketUrl)
-    await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => fail('语音连接超时，请重试。'), 12000)
-      const fail = message => { clearTimeout(timeout); reject(new Error(message)) }
-      this.rejectStart = () => fail('会话已结束')
-      socket.onopen = () => { clearTimeout(timeout); resolve() }
-      socket.onerror = () => fail('语音服务连接失败，请检查网络或设置。')
-      socket.onclose = () => fail('语音连接已关闭，请检查设置后重试。')
-    }).catch(error => { this.stop(); throw error })
+    const socket = this.socket = await this.openSocket(candidates).catch(error => { this.stop(); throw error })
     this.rejectStart = null
     if (this.closed) return
     let ready

@@ -22,7 +22,7 @@ LOCAL_HOSTS = {'127.0.0.1', 'localhost', '::1'}
 # 服务商允许 1 到 600 秒；签得越长，越不容易撞上「签发限流」。
 TOKEN_SECONDS = max(60, min(600, int(os.environ.get('JOURNEY_ASR_TOKEN_SECONDS', '600') or 600)))
 SESSION_REUSE_SECONDS = TOKEN_SECONDS
-_token_cache = {'fingerprint': None, 'token': '', 'expires': 0.0}
+_token_cache = {}
 _token_locks = {}
 
 
@@ -82,23 +82,44 @@ def public_host():
     return host
 
 
+def _validated_config(value):
+    base = str(value['base_url']).rstrip('/')
+    key = str(value['api_key']).strip()
+    url = urlsplit(base)
+    if (url.scheme != 'https' or url.hostname not in {'api.fourhz.ai', 'api.fourhz.amphion.top'}
+            or url.username or url.password or url.query or url.fragment or url.path or url.port not in (None, 443)
+            or not key or len(key) > 512):
+        raise ValueError()
+    return {'base_url': base, 'api_key': key}
+
+
 def configuration():
     if not enabled():
         raise HTTPException(503, '本地 ASR 尚未配置。')
     if os.environ.get('HOST', '') not in LOCAL_HOSTS:
         raise HTTPException(503, '本地 ASR 配置只能用于回环地址服务。')
     try:
-        value = json.loads(Path(os.environ['JOURNEY_ASR_CONFIG_FILE']).read_text())
-        base = str(value['base_url']).rstrip('/')
-        key = str(value['api_key']).strip()
-        url = urlsplit(base)
-        if (url.scheme != 'https' or url.hostname not in {'api.fourhz.ai', 'api.fourhz.amphion.top'}
-                or url.username or url.password or url.query or url.fragment or url.path or url.port not in (None, 443)
-                or not key or len(key) > 512):
-            raise ValueError()
-        return {'base_url': base, 'api_key': key}
+        return _validated_config(json.loads(Path(os.environ['JOURNEY_ASR_CONFIG_FILE']).read_text()))
     except (OSError, ValueError, KeyError, TypeError):
         raise HTTPException(503, '本地 ASR 配置无法读取，请检查私有配置文件。') from None
+
+
+def fallback_configurations():
+    """Extra FourHz deployments tried after the primary, in file order."""
+    try:
+        value = json.loads(Path(os.environ['JOURNEY_ASR_CONFIG_FILE']).read_text())
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    entries = value.get('fallbacks') if isinstance(value, dict) else None
+    if not isinstance(entries, list):
+        return []
+    configs = []
+    for entry in entries[:3]:
+        try:
+            configs.append(_validated_config(entry))
+        except (ValueError, KeyError, TypeError):
+            continue
+    return configs
 
 
 def local_request(request, mutation=False):
@@ -158,12 +179,12 @@ def _fingerprint(config):
 
 def reset_session_cache():
     """Test hook: forget any reused temporary token."""
-    _token_cache.update(fingerprint=None, token='', expires=0.0)
+    _token_cache.clear()
 
 
 def _reusable(fingerprint):
-    return (_token_cache['fingerprint'] == fingerprint and _token_cache['token']
-            and _token_cache['expires'] > time.monotonic())
+    entry = _token_cache.get(fingerprint)
+    return bool(entry and entry['token'] and entry['expires'] > time.monotonic())
 
 
 def _token_lifetime(token):
@@ -185,13 +206,12 @@ async def mint_token(config=None):
     config = config or configuration()
     fingerprint = _fingerprint(config)
     if _reusable(fingerprint):
-        return _token_cache['token']
+        return _token_cache[fingerprint]['token']
     async with _token_lock():
         if _reusable(fingerprint):
-            return _token_cache['token']
+            return _token_cache[fingerprint]['token']
         token = await _request_token(config)
-        _token_cache.update(fingerprint=fingerprint, token=token,
-                            expires=time.monotonic() + _token_lifetime(token))
+        _token_cache[fingerprint] = {'token': token, 'expires': time.monotonic() + _token_lifetime(token)}
         return token
 
 
@@ -224,10 +244,25 @@ async def _request_token(config):
         raise HTTPException(503, '无法取得 ASR 临时凭证，请稍后重试。') from None
 
 
-async def session_url():
-    if deepfake_enabled():
-        return deepfake_url()
-    config = configuration()
-    token = await mint_token(config)
+def _ws_url(config, token):
     base = config['base_url'].replace('https://', 'wss://', 1)
     return base + '/v1/asr/realtime?' + urlencode({'speech_model': 'fourhz-spectrum', 'token': token})
+
+
+async def session_urls():
+    """Every usable endpoint, primary first: production, test, then the bridge."""
+    urls = []
+    for config in [configuration(), *fallback_configurations()]:
+        try:
+            urls.append(_ws_url(config, await mint_token(config)))
+        except HTTPException:
+            continue
+    if deepfake_enabled():
+        urls.append(deepfake_url())
+    if not urls:
+        raise HTTPException(503, '语音服务暂时不可用，请稍后重试。')
+    return urls
+
+
+async def session_url():
+    return (await session_urls())[0]

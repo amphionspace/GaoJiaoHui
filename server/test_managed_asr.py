@@ -233,6 +233,41 @@ class ManagedAsrTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn('private-provider-diagnostics', error.exception.detail)
                 self.assertNotIn(self.config['api_key'], error.exception.detail)
 
+    async def test_candidates_follow_production_then_test_then_bridge(self):
+        production = {'base_url': 'https://api.fourhz.ai', 'api_key': 'prod-key'}
+        testing = {'base_url': 'https://api.fourhz.amphion.top', 'api_key': 'test-key'}
+        bridge = 'wss://amphion-gjh.example/deepfake/booth-asr?token=abc'
+
+        async def request(config):
+            return 'prod-token' if config is production else 'test-token'
+
+        with patch.object(managed_asr, 'configuration', return_value=production), \
+             patch.object(managed_asr, 'fallback_configurations', return_value=[testing]), \
+             patch.object(managed_asr, 'deepfake_url', return_value=bridge), \
+             patch.object(managed_asr, '_request_token', request):
+            urls = await managed_asr.session_urls()
+        self.assertEqual(len(urls), 3)
+        self.assertTrue(urls[0].startswith('wss://api.fourhz.ai/v1/asr/realtime?'))
+        self.assertTrue(urls[1].startswith('wss://api.fourhz.amphion.top/v1/asr/realtime?'))
+        self.assertEqual(urls[2], bridge)
+
+    async def test_a_failing_primary_is_skipped_for_the_next_candidate(self):
+        production = {'base_url': 'https://api.fourhz.ai', 'api_key': 'prod-key'}
+        testing = {'base_url': 'https://api.fourhz.amphion.top', 'api_key': 'test-key'}
+
+        async def request(config):
+            if config is production:
+                raise managed_asr.HTTPException(429, 'busy')
+            return 'test-token'
+
+        with patch.object(managed_asr, 'configuration', return_value=production), \
+             patch.object(managed_asr, 'fallback_configurations', return_value=[testing]), \
+             patch.object(managed_asr, 'deepfake_url', return_value=''), \
+             patch.object(managed_asr, '_request_token', request):
+            urls = await managed_asr.session_urls()
+        self.assertEqual(len(urls), 1)
+        self.assertTrue(urls[0].startswith('wss://api.fourhz.amphion.top/'))
+
     async def test_rate_limited_mint_is_retried_once(self):
         calls = []
 
@@ -270,6 +305,9 @@ class ManagedAsrTests(unittest.IsolatedAsyncioTestCase):
 
             def monotonic(self):
                 return self.now
+
+            def time(self):
+                return 1700000000.0 + self.now
 
         request = AsyncMock(side_effect=['token-1', 'token-2', 'token-3'])
         clock = Clock()

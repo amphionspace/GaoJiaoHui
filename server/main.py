@@ -663,7 +663,8 @@ async def config(request: Request, response: Response):
 @app.post('/api/journey/asr-session', dependencies=[Depends(compose_access)])
 async def asr_session():
     metrics_store.event('asr_session')
-    return {'url': await managed_asr.session_url()}
+    urls = await managed_asr.session_urls()
+    return {'url': urls[0], 'urls': urls}
 
 
 class PrintEvent(BaseModel):
