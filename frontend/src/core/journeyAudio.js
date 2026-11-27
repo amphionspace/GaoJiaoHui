@@ -192,6 +192,10 @@ export class JourneyRecorder {
     let socket
     let current = session
     for (let stage = 0; ; stage++) {
+      // Each attempt gets its own guard: switching providers must not consume
+      // the budget that belonged to the previous one.
+      clearTimeout(this.startupTimer)
+      this.startupTimer = setTimeout(() => this.fail('语音准备超过 20 秒，请检查网络后重试，或改用文字记录。'), 20000)
       try {
         socket = await this.openSocket(current ? sessionCandidates(current) : candidates)
         break

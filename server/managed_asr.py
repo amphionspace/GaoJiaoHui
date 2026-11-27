@@ -264,18 +264,22 @@ async def session_urls(stage=0):
     """
     configs = providers()
     bridge = deepfake_url() if deepfake_enabled() else ''
-    while stage < len(configs):
-        config = configs[stage]
+    # The local bridge opens in tens of milliseconds from any network, while a
+    # phone on mobile data can stall on the FourHz handshake; it goes first and
+    # the hosted deployments remain as fallbacks.
+    stages = ([('bridge', bridge)] if bridge else []) + [('fourhz', config) for config in configs]
+    while stage < len(stages):
+        kind, payload = stages[stage]
+        if kind == 'bridge':
+            return [payload], stage + 1 < len(stages)
         try:
-            token = await mint_token(config)
+            token = await mint_token(payload)
         except HTTPException:
             stage += 1
             continue
         # Hand each token out exactly once: one token opens one socket.
-        _token_cache.pop(_fingerprint(config), None)
-        return [_ws_url(config, token)], stage + 1 < len(configs) or bool(bridge)
-    if stage == len(configs) and bridge:
-        return [bridge], False
+        _token_cache.pop(_fingerprint(payload), None)
+        return [_ws_url(payload, token)], stage + 1 < len(stages)
     raise HTTPException(503, '语音服务暂时不可用，请稍后重试。')
 
 
