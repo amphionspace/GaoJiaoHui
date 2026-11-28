@@ -264,8 +264,8 @@ async def session_urls(stage=0):
     """
     configs = providers()
     bridge = deepfake_url() if deepfake_enabled() else ''
-    # Hosted deployments first; the local bridge is the last resort.
-    stages = [('fourhz', config) for config in configs] + ([('bridge', bridge)] if bridge else [])
+    # The local bridge is the first hop again; hosted deployments follow.
+    stages = ([('bridge', bridge)] if bridge else []) + [('fourhz', config) for config in configs]
     while stage < len(stages):
         kind, payload = stages[stage]
         if kind == 'bridge':

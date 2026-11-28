@@ -248,12 +248,12 @@ class ManagedAsrTests(unittest.IsolatedAsyncioTestCase):
             first = await managed_asr.session_urls(0)
             second = await managed_asr.session_urls(1)
             third = await managed_asr.session_urls(2)
-        # Hosted production first, then the test host, the bridge last.
-        self.assertTrue(first[0][0].startswith('wss://api.fourhz.ai/v1/asr/realtime?'))
-        self.assertTrue(first[1])
-        self.assertTrue(second[0][0].startswith('wss://api.fourhz.amphion.top/v1/asr/realtime?'))
+        # The local bridge leads; hosted production and test follow.
+        self.assertEqual(first, ([bridge], True))
+        self.assertTrue(second[0][0].startswith('wss://api.fourhz.ai/v1/asr/realtime?'))
         self.assertTrue(second[1])
-        self.assertEqual(third, ([bridge], False))
+        self.assertTrue(third[0][0].startswith('wss://api.fourhz.amphion.top/v1/asr/realtime?'))
+        self.assertFalse(third[1])
 
     async def test_a_failing_primary_is_skipped_for_the_next_candidate(self):
         production = {'base_url': 'https://api.fourhz.ai', 'api_key': 'prod-key'}
